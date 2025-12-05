@@ -51,65 +51,126 @@ NetChain/
 │
 ├── src/
 │ ├── main.rs # Entry point
-│ ├── block.rs # Block structure + hashing
-│ ├── blockchain.rs # Blockchain logic
-│ ├── wallet.rs # Keypairs, signing, verification
-│ ├── network.rs # P2P networking
-│ └── consensus.rs # Proof of Internet engine
-│
-├── Cargo.toml
-└── README.md
+# NetChain
 
-
-
-*(Modules will grow as development continues.)*
+An experimental Layer-1 blockchain prototype implemented in Rust. NetChain explores a Proof-of-Internet (PoI) consensus where validators are ranked by network performance (upload/download speed, latency, stability and uptime).
 
 ---
 
-## 🧱 Current Progress
+**Contents**
 
-### ✔ Completed
-- Basic blockchain (blocks, hashing, chain validation)  
-- Genesis block  
-- Add & validate new blocks  
-
-### 🔧 In Progress
-- Wallets and signed transactions  
-- P2P networking layer  
-- Speed measurement module  
-
-### ⏳ Coming Soon
-- Full PoI consensus  
-- NetChain Public Testnet  
-- Validator dashboard  
-- Block explorer  
-- Native token economics (NC token)
+- [About](#about)
+- [Highlights](#highlights)
+- [Quick start](#quick-start)
+- [Run a local node](#run-a-local-node)
+- [Development](#development)
+- [Project layout](#project-layout)
+- [Testing](#testing)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## 💡 How Proof of Internet Works (Simple)
+## About
 
-1. Each validator runs a **NetChain node**.  
-2. The node performs continuous internet tests:
-   - Upload speed  
-   - Download speed  
-   - Latency  
-   - Packet stability  
-3. Nodes submit a **Speed Proof** to the blockchain.  
-4. NetChain ranks validators based on their results.  
-5. The fastest + most stable nodes produce blocks and earn **NC tokens**.
+NetChain replaces energy-intensive PoW and capital-weighted PoS with Proof-of-Internet (PoI) — a concept where nodes gain validation priority by demonstrating superior network performance. The repository is a developer-focused prototype: core blockchain logic, a PoI scoring engine, and networking primitives.
 
-This prevents:
-- Costly mining  
-- Rich-only staking systems  
-- Centralized networks  
+## Highlights
 
-**PoI = Fair validation for everyone with strong internet.**
+- Proof-of-Internet (PoI) consensus prototype
+- Implemented in Rust for performance and safety
+- Modular: blocks, chain validation, wallets, P2P networking, consensus
 
----
+## Quick start
 
-## 🛠 Getting Started (Development Mode)
+Prerequisites:
 
-### 1️⃣ Install Rust
+- Rust toolchain (install via `rustup`)
+
+Install/update the Rust toolchain:
+
 ```bash
-curl https://sh.rustup.rs -sSf | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup update
+```
+
+Build the project:
+
+```bash
+cargo build
+```
+
+Run the project (default entry):
+
+```bash
+cargo run
+```
+
+Run tests:
+
+```bash
+cargo test
+```
+
+Use `cargo run --release` for optimized runs.
+
+## Run a local node
+
+This repo is a prototype; a simple local run starts the node using `cargo run`. If the node accepts flags or a config file, pass them as arguments, for example:
+
+```bash
+# example (replace with real flags when implemented)
+cargo run -- --listen 0.0.0.0:30333 --fast-sync
+```
+
+I can add a sample `config/default.toml` and CLI docs if you want a reproducible local test scenario.
+
+## Development
+
+- Work in `src/` and follow standard Rust conventions.
+- Recommended workflow:
+   1. Create a feature branch
+   2. Add tests for new behavior
+   3. Open a PR against `main` with a clear description
+
+Key areas to work on:
+
+- `consensus.rs` — PoI scoring & validator selection
+- `network.rs` — P2P transport and discovery (libp2p integration)
+- `wallet.rs` — key management and signing
+
+## Project layout
+
+```
+netchain/
+├── Cargo.toml          # manifest
+├── README.md
+└── src/
+      ├── main.rs        # entry point
+      ├── block.rs       # block structure & hashing
+      ├── blockchain.rs  # chain logic
+      ├── wallet.rs      # keys & signing
+      ├── network.rs     # p2p networking
+      └── consensus.rs   # PoI engine
+```
+
+Files and modules may be added as development continues.
+
+## Testing
+
+Run unit tests with `cargo test`. Add unit tests for core logic (blocks, validation, consensus scoring). Integration tests for networking may require multiple processes or test harnesses.
+
+## Contributing
+
+- Fork and open a pull request against `main`.
+- Keep PRs focused and include tests for new behavior.
+- If you'd like, I can add a `CONTRIBUTING.md` with a checklist and branch strategy.
+
+## License
+
+No `LICENSE` file detected. Add a `LICENSE` (e.g., MIT or Apache-2.0) to specify repository licensing.
+
+---
+
+If you'd like the README to include diagrams, example payloads, a configuration file, or ready-to-run local test scripts, tell me which and I will add them.
