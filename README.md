@@ -1,36 +1,38 @@
-# ⚡ SpeedChain — A Blockchain Secured by Internet Speed (PoI Consensus)
+# ⚡ NetChain — A Blockchain Secured by Internet Speed (PoI Consensus)
 
-SpeedChain is a **next-generation Layer-1 blockchain** that replaces traditional Proof-of-Work (PoW) and Proof-of-Stake (PoS) with a new consensus algorithm called **Proof of Internet (PoI)** — where **validators are selected based on their real internet speed, stability, and uptime**.
+NetChain is a **next-generation Layer-1 blockchain** that replaces traditional Proof-of-Work (PoW) and Proof-of-Stake (PoS) with a new consensus algorithm called **Proof of Internet (PoI)** — where **validators are selected based on their real internet speed, stability, and uptime**.
 
-SpeedChain is fast, fair, and energy-efficient. Anyone with a strong internet connection can participate and earn rewards.
+NetChain is fast, fair, and energy-efficient. Anyone with a strong internet connection can participate and earn rewards.
 
 ---
 
 ## 🚀 Features
 
 ### ✅ **1. Proof of Internet (PoI) Consensus**
-SpeedChain selects validators based on:
-- Upload speed
-- Download speed
-- Latency
-- Uptime
-- Packet stability
+NetChain selects validators based on:
+- Upload speed  
+- Download speed  
+- Latency  
+- Uptime  
+- Packet stability  
 
 Faster and more stable nodes → higher chances of validating blocks → more rewards.
 
 ---
 
 ### ✅ **2. Lightweight Rust Implementation**
-SpeedChain is built in **Rust**, giving:
+NetChain is built in **Rust**, giving:
 - High performance  
 - Memory safety  
 - Zero-cost abstractions  
-- Modern cryptography support  
+- Modern cryptography  
+- Fast execution  
 
 ---
 
 ### ✅ **3. Simple, Modular Architecture**
-The project is divided into stages:
+
+Development is divided into stages:
 
 1. **Block & Blockchain layer**  
 2. **Hashing and validation**  
@@ -58,46 +60,47 @@ NetChain/
 
 *(Modules will grow as development continues.)*
 
+---
 
 ## 🧱 Current Progress
 
-### Completed:
-✔ Basic blockchain (blocks, hashing, chain validation)  
-✔ Genesis block  
-✔ Add & validate new blocks  
+### ✔ Completed
+- Basic blockchain (blocks, hashing, chain validation)  
+- Genesis block  
+- Add & validate new blocks  
 
-### In Progress:
-🔄 Wallets and signed transactions  
-🔄 P2P networking layer  
-🔄 Speed measurement module  
+### 🔧 In Progress
+- Wallets and signed transactions  
+- P2P networking layer  
+- Speed measurement module  
 
-### Coming Soon:
-⏳ Full PoI consensus  
-⏳ SpeedChain Testnet  
-⏳ Validator dashboard  
-⏳ Explorer  
-⏳ Native token economics (SC token)
+### ⏳ Coming Soon
+- Full PoI consensus  
+- NetChain Public Testnet  
+- Validator dashboard  
+- Block explorer  
+- Native token economics (NC token)
 
 ---
 
 ## 💡 How Proof of Internet Works (Simple)
 
-1. Each validator runs a SpeedChain node.  
-2. Node performs continuous internet tests:
-   - Upload  
-   - Download  
+1. Each validator runs a **NetChain node**.  
+2. The node performs continuous internet tests:
+   - Upload speed  
+   - Download speed  
    - Latency  
-   - Packet loss  
-3. Node submits a "Speed Proof" to the network.  
-4. The validator selection algorithm ranks nodes.  
-5. Fastest + most stable nodes produce blocks and earn **SC tokens**.  
+   - Packet stability  
+3. Nodes submit a **Speed Proof** to the blockchain.  
+4. NetChain ranks validators based on their results.  
+5. The fastest + most stable nodes produce blocks and earn **NC tokens**.
 
 This prevents:
-- Expensive mining  
-- Rich-controlled staking  
-- Centralization  
+- Costly mining  
+- Rich-only staking systems  
+- Centralized networks  
 
-PoI gives **fair access to everyone with strong internet**.
+**PoI = Fair validation for everyone with strong internet.**
 
 ---
 
