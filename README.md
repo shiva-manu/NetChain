@@ -45,6 +45,8 @@ Development is divided into stages:
 ---
 
 ## 📁 Project Structure
+
+
 NetChain/
 │
 ├── src/
@@ -57,6 +59,8 @@ NetChain/
 │
 ├── Cargo.toml
 └── README.md
+
+
 
 *(Modules will grow as development continues.)*
 
