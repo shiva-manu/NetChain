@@ -110,7 +110,7 @@ impl P2PService {
         })
     }
 
-    pub async fn run(mut self, sender: mpsc::Sender<P2PEvent>) {
+    pub async fn run(&mut self, sender: mpsc::Sender<P2PEvent>) {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::Behaviour(OutEvent::Gossip(
@@ -138,5 +138,12 @@ impl P2PService {
                 _ => {}
             }
         }
+    }
+    pub fn publish_block(&mut self,block_json:String){
+        let _=self
+        .swarm
+        .behaviour_mut()
+        .gossipsub
+        .publish(self.block_topic.clone(),block_json.as_bytes());
     }
 }
