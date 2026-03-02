@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
             }
 
             block
+            bc.add_block(vec![])
         };
 
         let json = serde_json::to_string(&block).unwrap();
