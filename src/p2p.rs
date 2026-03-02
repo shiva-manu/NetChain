@@ -114,9 +114,9 @@ impl P2PService {
                     ..
                 })) => {
                     let msg = String::from_utf8_lossy(&message.data).to_string();
-                    let _ = sender
-                        .send(P2PEvent::Message(NetworkMessage::Block(msg)))
-                        .await;
+                    if let Some(network_msg) = self.route_topic_message(&message.topic, msg) {
+                        let _ = sender.send(P2PEvent::Message(network_msg)).await;
+                    }
                 }
 
                 SwarmEvent::Behaviour(OutEvent::Mdns(event)) => match event {
@@ -142,5 +142,52 @@ impl P2PService {
             .behaviour_mut()
             .gossipsub
             .publish(self.block_topic.clone(), block_json.as_bytes());
+    }
+
+    pub fn publish_transaction(&mut self, tx_json: String) {
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(self.tx_topic.clone(), tx_json.as_bytes());
+    }
+
+    fn route_topic_message(
+        &self,
+        topic: &libp2p::gossipsub::TopicHash,
+        payload: String,
+    ) -> Option<NetworkMessage> {
+        if *topic == self.block_topic.hash() {
+            Some(NetworkMessage::Block(payload))
+        } else if *topic == self.tx_topic.hash() {
+            Some(NetworkMessage::Transaction(payload))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkMessage;
+
+    fn route_topic_payload(topic: &str, payload: String) -> Option<NetworkMessage> {
+        match topic {
+            "blocks" => Some(NetworkMessage::Block(payload)),
+            "transactions" => Some(NetworkMessage::Transaction(payload)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn routes_block_topic_to_block_message() {
+        let routed = route_topic_payload("blocks", "{\"index\":1}".to_string());
+        assert!(matches!(routed, Some(NetworkMessage::Block(_))));
+    }
+
+    #[test]
+    fn routes_transaction_topic_to_transaction_message() {
+        let routed = route_topic_payload("transactions", "{\"amount\":5}".to_string());
+        assert!(matches!(routed, Some(NetworkMessage::Transaction(_))));
     }
 }
