@@ -1,33 +1,36 @@
-// src/main.rs
-
 mod block;
 mod blockchain;
+mod consensus;
+mod mempool;
 mod p2p;
+mod state;
+mod transaction;
 
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{interval, Duration};
 
 use block::Block;
 use blockchain::Blockchain;
+use mempool::Mempool;
 use p2p::{NetworkMessage, P2PEvent, P2PService};
+use transaction::SignedTransaction;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("⚡ Starting NetChain (development mode)");
 
-    // Shared blockchain state
     let blockchain = Arc::new(Mutex::new(Blockchain::new()));
+    let mempool = Arc::new(Mutex::new(Mempool::new()));
+
     {
         let bc = blockchain.lock().await;
         println!("Genesis block: {:?}", bc.last_block());
     }
 
-    // Channel: P2P → main
     let (tx, mut rx) = mpsc::channel(100);
 
-    // Start P2P networking
     let port = 30333;
     let p2p = Arc::new(Mutex::new(P2PService::new(port).await?));
 
@@ -39,46 +42,78 @@ async fn main() -> Result<()> {
 
     println!("Node running on port {port}. Waiting for P2P events...\n");
 
-    // 🔥 TEMPORARY: create & broadcast a block after 10 seconds
-    let p2p_broadcast = p2p.clone();
-    let blockchain_broadcast = blockchain.clone();
-    tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+    let proposer_enabled = std::env::var("NETCHAIN_PROPOSER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-        println!("⛏️ Creating new block locally...");
+    if proposer_enabled {
+        println!("⛏️ Proposer loop enabled (NETCHAIN_PROPOSER)");
+        let p2p_proposer = p2p.clone();
+        let blockchain_proposer = blockchain.clone();
+        let mempool_proposer = mempool.clone();
 
-        let block = {
-            let mut bc = blockchain_broadcast.lock().await;
-            bc.add_block("Hello from NetChain".to_string())
-        };
+        tokio::spawn(async move {
+            let mut tick = interval(Duration::from_secs(5));
+            loop {
+                tick.tick().await;
 
-        let json = serde_json::to_string(&block).unwrap();
+                let maybe_block = {
+                    let mut bc = blockchain_proposer.lock().await;
+                    let mut mp = mempool_proposer.lock().await;
+                    let selected = mp.select_for_block(&bc.state, 100);
 
-        let mut p2p = p2p_broadcast.lock().await;
-        p2p.publish_block(json);
+                    if selected.is_empty() {
+                        println!("⏭️ Proposer tick: no pending transactions");
+                        None
+                    } else {
+                        match bc.add_block(selected.clone()) {
+                            Ok(block) => {
+                                mp.remove_transactions(&selected);
+                                println!(
+                                    "✅ Proposed block #{} with {} txs",
+                                    block.index,
+                                    block.transactions.len()
+                                );
+                                Some(block)
+                            }
+                            Err(err) => {
+                                println!("❌ Failed to propose block: {err}");
+                                None
+                            }
+                        }
+                    }
+                };
 
-        println!("📡 Block broadcasted");
-    });
+                if let Some(block) = maybe_block {
+                    if let Ok(json) = serde_json::to_string(&block) {
+                        let mut p2p = p2p_proposer.lock().await;
+                        p2p.publish_block(json);
+                        println!("📡 Broadcasted proposed block");
+                    }
+                }
+            }
+        });
+    } else {
+        println!("ℹ️ Proposer loop disabled (set NETCHAIN_PROPOSER=1 to enable)");
+    }
 
-    // Main event loop
     while let Some(event) = rx.recv().await {
         match event {
             P2PEvent::Message(NetworkMessage::Block(block_json)) => {
-                println!("📦 Received block data");
-
                 match serde_json::from_str::<Block>(&block_json) {
                     Ok(block) => {
-                        let mut bc = blockchain.lock().await;
-                        match bc.validate_and_add_block(block) {
-                            Ok(_) => {
-                                println!(
-                                    "✅ Block accepted. Chain height: {}",
-                                    bc.chain.len() - 1
-                                );
-                            }
-                            Err(e) => {
-                                println!("❌ Block rejected: {e}");
-                            }
+                        let accepted = {
+                            let mut bc = blockchain.lock().await;
+                            bc.validate_and_add_block(block.clone()).is_ok()
+                        };
+
+                        if accepted {
+                            let mut mp = mempool.lock().await;
+                            mp.remove_transactions(&block.transactions);
+                            let height = { blockchain.lock().await.chain.len() - 1 };
+                            println!("✅ Block accepted. Chain height: {}", height);
+                        } else {
+                            println!("❌ Block rejected");
                         }
                     }
                     Err(e) => {
@@ -86,15 +121,26 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            P2PEvent::Message(NetworkMessage::Transaction(tx_json)) => {
+                match serde_json::from_str::<SignedTransaction>(&tx_json) {
+                    Ok(tx) => {
+                        let state_snapshot = {
+                            let bc = blockchain.lock().await;
+                            bc.state.clone()
+                        };
 
-            P2PEvent::Message(NetworkMessage::Transaction(tx)) => {
-                println!("💸 Received transaction (not yet handled): {tx}");
+                        let mut mp = mempool.lock().await;
+                        match mp.add_transaction(tx, &state_snapshot) {
+                            Ok(_) => println!("💸 Transaction accepted into mempool"),
+                            Err(e) => println!("❌ Transaction rejected: {e:?}"),
+                        }
+                    }
+                    Err(e) => println!("❌ Failed to deserialize transaction: {e}"),
+                }
             }
-
             P2PEvent::PeerConnected(peer) => {
                 println!("🔗 Peer connected: {peer}");
             }
-
             P2PEvent::PeerDisconnected(peer) => {
                 println!("❌ Peer disconnected: {peer}");
             }

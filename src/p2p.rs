@@ -1,25 +1,16 @@
-// src/p2p.rs
-
 use libp2p::futures::StreamExt;
-
+use libp2p::swarm::derive_prelude::*;
 use libp2p::{
-    PeerId, identity,
-    swarm::{Swarm, SwarmEvent},
     gossipsub::{
-        Behaviour as Gossipsub,
-        Event as GossipsubEvent,
-        MessageAuthenticity,
-        IdentTopic as Topic,
-        Config as GossipsubConfig,
+        Behaviour as Gossipsub, Config as GossipsubConfig, Event as GossipsubEvent,
+        IdentTopic as Topic, MessageAuthenticity,
     },
+    identity,
     mdns::{tokio::Behaviour as Mdns, Event as MdnsEvent},
     noise,
-    tcp,
-    yamux,
-    Transport,
+    swarm::{Swarm, SwarmEvent},
+    tcp, yamux, PeerId, Transport,
 };
-
-use libp2p::swarm::derive_prelude::*;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -81,7 +72,8 @@ impl P2PService {
         let mut gossipsub = Gossipsub::new(
             MessageAuthenticity::Signed(local_key),
             GossipsubConfig::default(),
-        ).map_err(|e| anyhow::anyhow!(e))?;
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
         let block_topic = Topic::new("blocks");
         let tx_topic = Topic::new("transactions");
@@ -90,7 +82,6 @@ impl P2PService {
         gossipsub.subscribe(&tx_topic)?;
 
         let mdns = Mdns::new(Default::default(), peer_id)?;
-
         let behaviour = NetBehaviour { gossipsub, mdns };
 
         let mut swarm = Swarm::new(
@@ -113,13 +104,20 @@ impl P2PService {
     pub async fn run(&mut self, sender: mpsc::Sender<P2PEvent>) {
         loop {
             match self.swarm.select_next_some().await {
-                SwarmEvent::Behaviour(OutEvent::Gossip(
-                    GossipsubEvent::Message { message, .. },
-                )) => {
+                SwarmEvent::Behaviour(OutEvent::Gossip(GossipsubEvent::Message {
+                    message,
+                    ..
+                })) => {
                     let msg = String::from_utf8_lossy(&message.data).to_string();
-                    let _ = sender
-                        .send(P2PEvent::Message(NetworkMessage::Block(msg)))
-                        .await;
+                    let event = if message.topic == self.block_topic.hash() {
+                        P2PEvent::Message(NetworkMessage::Block(msg))
+                    } else if message.topic == self.tx_topic.hash() {
+                        P2PEvent::Message(NetworkMessage::Transaction(msg))
+                    } else {
+                        continue;
+                    };
+
+                    let _ = sender.send(event).await;
                 }
 
                 SwarmEvent::Behaviour(OutEvent::Mdns(event)) => match event {
@@ -139,11 +137,20 @@ impl P2PService {
             }
         }
     }
-    pub fn publish_block(&mut self,block_json:String){
-        let _=self
-        .swarm
-        .behaviour_mut()
-        .gossipsub
-        .publish(self.block_topic.clone(),block_json.as_bytes());
+
+    pub fn publish_block(&mut self, block_json: String) {
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(self.block_topic.clone(), block_json.as_bytes());
+    }
+
+    pub fn publish_transaction(&mut self, tx_json: String) {
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(self.tx_topic.clone(), tx_json.as_bytes());
     }
 }
