@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::transaction::SignedTransaction;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
     pub index: u64,
@@ -40,6 +42,11 @@ impl Block {
             "index": index,
             "timestamp": timestamp.to_rfc3339(),
             "transactions": tx_hashes,
+        // Deterministic hash over block header + full transaction list.
+        let payload = serde_json::json!({
+            "index": index,
+            "timestamp": timestamp.to_rfc3339(),
+            "transactions": transactions,
             "previous_hash": previous_hash,
         })
         .to_string();

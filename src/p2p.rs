@@ -118,6 +118,9 @@ impl P2PService {
                     };
 
                     let _ = sender.send(event).await;
+                    if let Some(network_msg) = self.route_topic_message(&message.topic, msg) {
+                        let _ = sender.send(P2PEvent::Message(network_msg)).await;
+                    }
                 }
 
                 SwarmEvent::Behaviour(OutEvent::Mdns(event)) => match event {
@@ -152,5 +155,44 @@ impl P2PService {
             .behaviour_mut()
             .gossipsub
             .publish(self.tx_topic.clone(), tx_json.as_bytes());
+    }
+
+    fn route_topic_message(
+        &self,
+        topic: &libp2p::gossipsub::TopicHash,
+        payload: String,
+    ) -> Option<NetworkMessage> {
+        if *topic == self.block_topic.hash() {
+            Some(NetworkMessage::Block(payload))
+        } else if *topic == self.tx_topic.hash() {
+            Some(NetworkMessage::Transaction(payload))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkMessage;
+
+    fn route_topic_payload(topic: &str, payload: String) -> Option<NetworkMessage> {
+        match topic {
+            "blocks" => Some(NetworkMessage::Block(payload)),
+            "transactions" => Some(NetworkMessage::Transaction(payload)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn routes_block_topic_to_block_message() {
+        let routed = route_topic_payload("blocks", "{\"index\":1}".to_string());
+        assert!(matches!(routed, Some(NetworkMessage::Block(_))));
+    }
+
+    #[test]
+    fn routes_transaction_topic_to_transaction_message() {
+        let routed = route_topic_payload("transactions", "{\"amount\":5}".to_string());
+        assert!(matches!(routed, Some(NetworkMessage::Transaction(_))));
     }
 }

@@ -1,6 +1,10 @@
 use crate::transaction::{SignedTransaction, Transaction};
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Errors that can occur during state transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateError {
     InsufficientBalance,
@@ -11,6 +15,8 @@ pub enum StateError {
 }
 
 #[derive(Debug, Clone)]
+/// Account state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Account {
     pub balance: u64,
     pub nonce: u64,
@@ -24,6 +30,10 @@ impl Account {
 
 #[derive(Debug, Clone)]
 pub struct State {
+/// Global chain state (ledger).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct State {
+    /// address -> account
     accounts: HashMap<String, Account>,
 }
 
@@ -44,6 +54,12 @@ impl State {
 
     pub fn has_account(&self, address: &str) -> bool {
         self.accounts.contains_key(address)
+    pub fn from_accounts(accounts: HashMap<String, Account>) -> Self {
+        Self { accounts }
+    }
+
+    pub fn snapshot_accounts(&self) -> HashMap<String, Account> {
+        self.accounts.clone()
     }
 
     pub fn get_balance(&self, address: &str) -> u64 {
@@ -54,6 +70,7 @@ impl State {
         self.accounts.get(address).map(|a| a.nonce).unwrap_or(0)
     }
 
+    /// Validate a signed transaction WITHOUT mutating state.
     pub fn validate_transaction(&self, tx: &SignedTransaction) -> Result<(), StateError> {
         tx.verify().map_err(|_| StateError::InvalidSignature)?;
 
@@ -79,6 +96,7 @@ impl State {
         Ok(())
     }
 
+    /// Apply a signed transaction (mutates state).
     pub fn apply_transaction(&mut self, tx: &SignedTransaction) -> Result<(), StateError> {
         self.validate_transaction(tx)?;
 
@@ -99,6 +117,7 @@ impl State {
         Ok(())
     }
 
+    /// Apply multiple transactions sequentially.
     pub fn apply_transactions(&mut self, txs: &[SignedTransaction]) -> Result<(), StateError> {
         for tx in txs {
             self.apply_transaction(tx)?;
