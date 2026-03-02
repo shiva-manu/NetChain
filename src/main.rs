@@ -71,10 +71,7 @@ async fn main() -> Result<()> {
                         let mut bc = blockchain.lock().await;
                         match bc.validate_and_add_block(block) {
                             Ok(_) => {
-                                println!(
-                                    "✅ Block accepted. Chain height: {}",
-                                    bc.chain.len() - 1
-                                );
+                                println!("✅ Block accepted. Chain height: {}", bc.chain.len() - 1);
                             }
                             Err(e) => {
                                 println!("❌ Block rejected: {e}");
