@@ -1,3 +1,4 @@
+use crate::transaction::SignedTransaction;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,6 +33,15 @@ impl Block {
         transactions: &[SignedTransaction],
         previous_hash: &str,
     ) -> String {
+        let tx_hashes: Vec<String> = transactions
+            .iter()
+            .map(SignedTransaction::tx_hash_hex)
+            .collect();
+
+        let payload = serde_json::json!({
+            "index": index,
+            "timestamp": timestamp.to_rfc3339(),
+            "transactions": tx_hashes,
         // Deterministic hash over block header + full transaction list.
         let payload = serde_json::json!({
             "index": index,

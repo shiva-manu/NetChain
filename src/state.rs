@@ -1,4 +1,6 @@
 use crate::transaction::{SignedTransaction, Transaction};
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -12,6 +14,7 @@ pub enum StateError {
     SenderNotFound,
 }
 
+#[derive(Debug, Clone)]
 /// Account state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Account {
@@ -25,6 +28,8 @@ impl Account {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct State {
 /// Global chain state (ledger).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -47,6 +52,8 @@ impl State {
         Self { accounts }
     }
 
+    pub fn has_account(&self, address: &str) -> bool {
+        self.accounts.contains_key(address)
     pub fn from_accounts(accounts: HashMap<String, Account>) -> Self {
         Self { accounts }
     }

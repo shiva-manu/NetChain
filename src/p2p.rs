@@ -1,7 +1,5 @@
-// src/p2p.rs
-
 use libp2p::futures::StreamExt;
-
+use libp2p::swarm::derive_prelude::*;
 use libp2p::{
     gossipsub::{
         Behaviour as Gossipsub, Config as GossipsubConfig, Event as GossipsubEvent,
@@ -13,8 +11,6 @@ use libp2p::{
     swarm::{Swarm, SwarmEvent},
     tcp, yamux, PeerId, Transport,
 };
-
-use libp2p::swarm::derive_prelude::*;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -86,7 +82,6 @@ impl P2PService {
         gossipsub.subscribe(&tx_topic)?;
 
         let mdns = Mdns::new(Default::default(), peer_id)?;
-
         let behaviour = NetBehaviour { gossipsub, mdns };
 
         let mut swarm = Swarm::new(
@@ -114,6 +109,15 @@ impl P2PService {
                     ..
                 })) => {
                     let msg = String::from_utf8_lossy(&message.data).to_string();
+                    let event = if message.topic == self.block_topic.hash() {
+                        P2PEvent::Message(NetworkMessage::Block(msg))
+                    } else if message.topic == self.tx_topic.hash() {
+                        P2PEvent::Message(NetworkMessage::Transaction(msg))
+                    } else {
+                        continue;
+                    };
+
+                    let _ = sender.send(event).await;
                     if let Some(network_msg) = self.route_topic_message(&message.topic, msg) {
                         let _ = sender.send(P2PEvent::Message(network_msg)).await;
                     }
@@ -136,6 +140,7 @@ impl P2PService {
             }
         }
     }
+
     pub fn publish_block(&mut self, block_json: String) {
         let _ = self
             .swarm
