@@ -21,10 +21,10 @@ pub struct Weights {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Thresholds {
-    pub upload_mbps: f64,     // Max for normalization, e.g., 100.0
-    pub download_mbps: f64,   // e.g., 1000.0
-    pub latency_ms: f64,      // Max penalty at this, e.g., 200.0
-    pub uptime_percent: f64,  // Max, e.g., 100.0
+    pub upload_mbps: f64,       // Max for normalization, e.g., 100.0
+    pub download_mbps: f64,     // e.g., 1000.0
+    pub latency_ms: f64,        // Max penalty at this, e.g., 200.0
+    pub uptime_percent: f64,    // Max, e.g., 100.0
     pub stability_percent: f64, // Packet success rate, e.g., 100.0
 }
 
@@ -34,8 +34,8 @@ pub struct NodeMetrics {
     pub node_id: String, // e.g., pubkey hash
     pub upload_mbps: f64,
     pub download_mbps: f64,
-    pub latency_ms: f64,     // Avg RTT to peers
-    pub uptime_percent: f64, // Over last epoch (e.g., 99.5)
+    pub latency_ms: f64,        // Avg RTT to peers
+    pub uptime_percent: f64,    // Over last epoch (e.g., 99.5)
     pub stability_percent: f64, // % successful packets
 }
 
@@ -68,8 +68,11 @@ impl PoiScorer {
     /// Compute PoI score for a node (0.0 = useless, 1.0 = god-tier connection)
     pub fn poi_score(&self, metrics: &NodeMetrics) -> f64 {
         // Weighted sum of normalized metrics
-        let upload_norm =
-            NodeMetrics::normalize(metrics, metrics.upload_mbps, self.config.thresholds.upload_mbps);
+        let upload_norm = NodeMetrics::normalize(
+            metrics,
+            metrics.upload_mbps,
+            self.config.thresholds.upload_mbps,
+        );
         let download_norm = NodeMetrics::normalize(
             metrics,
             metrics.download_mbps,
@@ -80,8 +83,11 @@ impl PoiScorer {
             metrics.latency_ms,
             self.config.thresholds.latency_ms,
         );
-        let uptime_norm =
-            NodeMetrics::normalize(metrics, metrics.uptime_percent, self.config.thresholds.uptime_percent);
+        let uptime_norm = NodeMetrics::normalize(
+            metrics,
+            metrics.uptime_percent,
+            self.config.thresholds.uptime_percent,
+        );
         let stability_norm = NodeMetrics::normalize(
             metrics,
             metrics.stability_percent,
@@ -143,7 +149,11 @@ impl PoiScorer {
     }
 
     /// Non-deterministic RNG helper (ONLY for local tests). For consensus use deterministic seed.
-    pub fn select_validator_rng<R: Rng>(&self, pool: &HashMap<String, NodeMetrics>, rng: &mut R) -> String {
+    pub fn select_validator_rng<R: Rng>(
+        &self,
+        pool: &HashMap<String, NodeMetrics>,
+        rng: &mut R,
+    ) -> String {
         if pool.is_empty() {
             panic!("No validators in pool!");
         }
@@ -174,7 +184,10 @@ impl PoiScorer {
     }
 
     /// Epoch update: Re-score all nodes (call every N blocks)
-    pub fn update_epoch(&mut self, pool: &mut HashMap<String, NodeMetrics>) -> HashMap<String, f64> {
+    pub fn update_epoch(
+        &mut self,
+        pool: &mut HashMap<String, NodeMetrics>,
+    ) -> HashMap<String, f64> {
         pool.iter()
             .map(|(id, metrics)| (id.clone(), self.poi_score(metrics)))
             .collect()
@@ -230,7 +243,7 @@ mod tests {
             stability_percent: 100.0,
         };
         let score = scorer.poi_score(&metrics);
-        assert_eq!(score, 1.0);
+        assert!((score - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

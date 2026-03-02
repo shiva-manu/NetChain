@@ -27,11 +27,7 @@ impl Blockchain {
     /// Used by local miner / validator
     pub fn add_block(&mut self, data: String) -> Block {
         let last = self.last_block();
-        let new_block = Block::new(
-            last.index + 1,
-            data,
-            last.hash.clone(),
-        );
+        let new_block = Block::new(last.index + 1, data, last.hash.clone());
         self.chain.push(new_block.clone());
         new_block
     }
