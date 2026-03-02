@@ -17,8 +17,10 @@ use transaction::SignedTransaction;
 
 use block::Block;
 use blockchain::Blockchain;
+use mempool::Mempool;
 use p2p::{NetworkMessage, P2PEvent, P2PService};
 use state::State;
+use transaction::SignedTransaction;
 use storage::Storage;
 
 const SNAPSHOT_INTERVAL: usize = 5;
@@ -29,6 +31,8 @@ async fn main() -> Result<()> {
 
     // Shared blockchain state
     let blockchain = Arc::new(Mutex::new(Blockchain::new()));
+    let state = Arc::new(Mutex::new(State::new()));
+    let mempool = Arc::new(Mutex::new(Mempool::new()));
     let mempool = Arc::new(Mutex::new(Mempool::new()));
     let storage = Storage::new("data");
 
@@ -241,7 +245,33 @@ async fn main() -> Result<()> {
                 }
             }
             P2PEvent::Message(NetworkMessage::Transaction(tx)) => {
-                println!("💸 Received transaction (not yet handled): {tx}");
+                println!("💸 Received transaction payload");
+
+                let state_snapshot = {
+                    let state_guard = state.lock().await;
+                    state_guard.clone()
+                };
+
+                match serde_json::from_str::<SignedTransaction>(&tx) {
+                    Ok(signed_tx) => {
+                        let tx_hash = signed_tx.tx_hash_hex();
+                        let mut mempool_guard = mempool.lock().await;
+                        match mempool_guard.add_transaction(signed_tx, &state_snapshot) {
+                            Ok(_) => {
+                                println!(
+                                    "✅ Transaction accepted ({tx_hash}). Mempool size: {}",
+                                    mempool_guard.len()
+                                );
+                            }
+                            Err(e) => {
+                                println!("❌ Transaction rejected ({tx_hash}): {e:?}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to deserialize transaction: {e}");
+                    }
+                }
             }
 
             P2PEvent::PeerConnected(peer) => {
@@ -255,4 +285,25 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::transaction::{
+        generate_ed25519_keypair, pubkey_to_address_hex, SignedTransaction, Transaction,
+    };
+
+    #[test]
+    fn signed_transaction_deserializes_from_json_payload() {
+        let keypair = generate_ed25519_keypair();
+        let sender = pubkey_to_address_hex(&keypair.public);
+        let tx = Transaction::new(sender, "receiver".into(), 10, 1, 0, None);
+        let signed = SignedTransaction::sign_with_keypair(&tx, &keypair);
+
+        let json = serde_json::to_string(&signed).expect("signed transaction should serialize");
+        let parsed: SignedTransaction =
+            serde_json::from_str(&json).expect("payload should deserialize");
+
+        assert_eq!(parsed, signed);
+    }
 }
