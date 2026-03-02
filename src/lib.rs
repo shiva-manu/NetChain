@@ -4,4 +4,5 @@ pub mod consensus;
 pub mod mempool;
 pub mod p2p;
 pub mod state;
+pub mod storage;
 pub mod transaction;

@@ -3,7 +3,7 @@
 use crate::block::Block;
 use crate::state::State;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Blockchain {
     pub chain: Vec<Block>,
     pub state: State,
@@ -21,6 +21,23 @@ impl Blockchain {
         };
         bc.chain.push(Self::genesis_block());
         bc
+    }
+
+    pub fn from_chain(chain: Vec<Block>) -> Result<Self, String> {
+        if chain.is_empty() {
+            return Err("Loaded chain is empty".into());
+        }
+
+        let bc = Self { chain };
+        if bc.chain[0].index != 0 || bc.chain[0].previous_hash != "0" {
+            return Err("Invalid genesis block".into());
+        }
+
+        if !bc.is_valid() {
+            return Err("Loaded chain failed validation".into());
+        }
+
+        Ok(bc)
     }
 
     fn genesis_block() -> Block {
