@@ -3,6 +3,8 @@
 mod block;
 mod blockchain;
 mod p2p;
+mod state;
+mod transaction;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -49,7 +51,7 @@ async fn main() -> Result<()> {
 
         let block = {
             let mut bc = blockchain_broadcast.lock().await;
-            bc.add_block("Hello from NetChain".to_string())
+            bc.add_block(vec![])
         };
 
         let json = serde_json::to_string(&block).unwrap();

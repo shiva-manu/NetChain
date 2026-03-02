@@ -2,23 +2,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::transaction::SignedTransaction;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Block {
     pub index: u64,
     pub timestamp: DateTime<Utc>,
-    pub data: String,
+    pub transactions: Vec<SignedTransaction>,
     pub previous_hash: String,
     pub hash: String,
 }
 
 impl Block {
-    pub fn new(index: u64, data: String, previous_hash: String) -> Self {
+    pub fn new(index: u64, transactions: Vec<SignedTransaction>, previous_hash: String) -> Self {
         let timestamp = Utc::now();
-        let hash = Self::calculate_hash(index, &timestamp, &data, &previous_hash);
+        let hash = Self::calculate_hash(index, &timestamp, &transactions, &previous_hash);
         Self {
             index,
             timestamp,
-            data,
+            transactions,
             previous_hash,
             hash,
         }
@@ -27,14 +29,14 @@ impl Block {
     pub fn calculate_hash(
         index: u64,
         timestamp: &DateTime<Utc>,
-        data: &str,
+        transactions: &[SignedTransaction],
         previous_hash: &str,
     ) -> String {
-        // Simple hash over fields (Json encoding)
+        // Deterministic hash over block header + full transaction list.
         let payload = serde_json::json!({
             "index": index,
             "timestamp": timestamp.to_rfc3339(),
-            "data": data,
+            "transactions": transactions,
             "previous_hash": previous_hash,
         })
         .to_string();
