@@ -40,20 +40,32 @@ impl Mempool {
             return Err(MempoolError::DuplicateTransaction);
         }
 
-        state
-            .validate_transaction(&tx)
-            .map_err(MempoolError::InvalidTransaction)?;
+        tx.verify()
+            .map_err(|_| MempoolError::InvalidTransaction(StateError::InvalidSignature))?;
+
+        if tx.tx.amount == 0 {
+            return Err(MempoolError::InvalidTransaction(StateError::ZeroAmount));
+        }
+
+        if state.get_balance(&tx.tx.sender) < tx.tx.amount + tx.tx.fee {
+            return Err(MempoolError::InvalidTransaction(
+                StateError::InsufficientBalance,
+            ));
+        }
 
         let sender = tx.tx.sender.clone();
         let nonce = tx.tx.nonce;
+        let state_nonce = state.get_nonce(&sender);
 
         if let Some(queue) = self.by_sender.get(&sender) {
             if let Some(last_hash) = queue.back() {
                 let last_tx = self.txs.get(last_hash).expect("tx hash should exist");
-                if nonce <= last_tx.tx.nonce {
+                if nonce != last_tx.tx.nonce + 1 {
                     return Err(MempoolError::NonceTooLow);
                 }
             }
+        } else if nonce != state_nonce {
+            return Err(MempoolError::NonceTooLow);
         }
 
         self.seen.insert(tx_hash.clone());
@@ -81,10 +93,69 @@ impl Mempool {
         }
     }
 
-    pub fn select_for_block(&self, max_txs: usize) -> Vec<SignedTransaction> {
-        let mut candidates: Vec<&SignedTransaction> = self.txs.values().collect();
-        candidates.sort_by(|a, b| b.tx.fee.cmp(&a.tx.fee));
-        candidates.into_iter().take(max_txs).cloned().collect()
+    pub fn select_for_block(&self, state: &State, max_txs: usize) -> Vec<SignedTransaction> {
+        let mut selected = Vec::new();
+        let mut next_nonce: HashMap<String, u64> = HashMap::new();
+        let mut next_index: HashMap<String, usize> = HashMap::new();
+        let mut ready: HashMap<String, SignedTransaction> = HashMap::new();
+
+        for sender in self.by_sender.keys() {
+            next_nonce.insert(sender.clone(), state.get_nonce(sender));
+            next_index.insert(sender.clone(), 0);
+            self.refresh_ready_for_sender(sender, &mut next_nonce, &mut next_index, &mut ready);
+        }
+
+        while selected.len() < max_txs && !ready.is_empty() {
+            let best_sender = ready
+                .iter()
+                .max_by_key(|(_, tx)| tx.tx.fee)
+                .map(|(sender, _)| sender.clone())
+                .expect("ready map is non-empty");
+
+            let chosen = ready
+                .remove(&best_sender)
+                .expect("selected sender should be in ready map");
+            selected.push(chosen.clone());
+
+            *next_nonce
+                .get_mut(&best_sender)
+                .expect("sender should have a nonce entry") += 1;
+            self.refresh_ready_for_sender(
+                &best_sender,
+                &mut next_nonce,
+                &mut next_index,
+                &mut ready,
+            );
+        }
+
+        selected
+    }
+
+    fn refresh_ready_for_sender(
+        &self,
+        sender: &str,
+        next_nonce: &mut HashMap<String, u64>,
+        next_index: &mut HashMap<String, usize>,
+        ready: &mut HashMap<String, SignedTransaction>,
+    ) {
+        let Some(queue) = self.by_sender.get(sender) else {
+            ready.remove(sender);
+            return;
+        };
+
+        let idx = *next_index.get(sender).unwrap_or(&0);
+        let Some(hash) = queue.get(idx) else {
+            ready.remove(sender);
+            return;
+        };
+        let tx = self.txs.get(hash).expect("tx hash should exist");
+
+        if tx.tx.nonce == *next_nonce.get(sender).unwrap_or(&0) {
+            ready.insert(sender.to_string(), tx.clone());
+            next_index.insert(sender.to_string(), idx + 1);
+        } else {
+            ready.remove(sender);
+        }
     }
 }
 
@@ -128,5 +199,99 @@ mod tests {
             mempool.add_transaction(signed, &state),
             Err(MempoolError::DuplicateTransaction)
         ));
+    }
+
+    #[test]
+    fn test_nonce_gap_rejected() {
+        let kp = generate_ed25519_keypair();
+        let addr = pubkey_to_address_hex(&kp.public);
+        let state = State::with_genesis(vec![(addr.clone(), 1000)]);
+        let mut mempool = Mempool::new();
+
+        let gap_tx = Transaction::new(addr.clone(), "bob".into(), 50, 1, 1, None);
+        let signed = crate::transaction::SignedTransaction::sign_with_keypair(&gap_tx, &kp);
+
+        assert!(matches!(
+            mempool.add_transaction(signed, &state),
+            Err(MempoolError::NonceTooLow)
+        ));
+    }
+
+    #[test]
+    fn test_out_of_order_sender_tx_rejected() {
+        let kp = generate_ed25519_keypair();
+        let addr = pubkey_to_address_hex(&kp.public);
+        let state = State::with_genesis(vec![(addr.clone(), 1000)]);
+        let mut mempool = Mempool::new();
+
+        let tx0 = Transaction::new(addr.clone(), "bob".into(), 10, 1, 0, None);
+        let tx2 = Transaction::new(addr.clone(), "carol".into(), 10, 1, 2, None);
+        let signed0 = crate::transaction::SignedTransaction::sign_with_keypair(&tx0, &kp);
+        let signed2 = crate::transaction::SignedTransaction::sign_with_keypair(&tx2, &kp);
+
+        assert!(mempool.add_transaction(signed0, &state).is_ok());
+        assert!(matches!(
+            mempool.add_transaction(signed2, &state),
+            Err(MempoolError::NonceTooLow)
+        ));
+    }
+
+    #[test]
+    fn test_valid_contiguous_sequence_accepted() {
+        let kp = generate_ed25519_keypair();
+        let addr = pubkey_to_address_hex(&kp.public);
+        let state = State::with_genesis(vec![(addr.clone(), 1000)]);
+        let mut mempool = Mempool::new();
+
+        for nonce in 0..3 {
+            let tx = Transaction::new(addr.clone(), format!("recv-{nonce}"), 10, 1, nonce, None);
+            let signed = crate::transaction::SignedTransaction::sign_with_keypair(&tx, &kp);
+            assert!(mempool.add_transaction(signed, &state).is_ok());
+        }
+
+        assert_eq!(mempool.len(), 3);
+    }
+
+    #[test]
+    fn test_select_for_block_respects_executable_nonce_order() {
+        let kp_a = generate_ed25519_keypair();
+        let addr_a = pubkey_to_address_hex(&kp_a.public);
+        let kp_b = generate_ed25519_keypair();
+        let addr_b = pubkey_to_address_hex(&kp_b.public);
+
+        let state = State::with_genesis(vec![(addr_a.clone(), 1000), (addr_b.clone(), 1000)]);
+        let mut mempool = Mempool::new();
+
+        let a0 = Transaction::new(addr_a.clone(), "x".into(), 10, 1, 0, None);
+        let a1 = Transaction::new(addr_a.clone(), "y".into(), 10, 50, 1, None);
+        let b0 = Transaction::new(addr_b.clone(), "z".into(), 10, 10, 0, None);
+
+        assert!(mempool
+            .add_transaction(
+                crate::transaction::SignedTransaction::sign_with_keypair(&a0, &kp_a),
+                &state
+            )
+            .is_ok());
+        assert!(mempool
+            .add_transaction(
+                crate::transaction::SignedTransaction::sign_with_keypair(&a1, &kp_a),
+                &state
+            )
+            .is_ok());
+        assert!(mempool
+            .add_transaction(
+                crate::transaction::SignedTransaction::sign_with_keypair(&b0, &kp_b),
+                &state
+            )
+            .is_ok());
+
+        let selected = mempool.select_for_block(&state, 3);
+        let a_nonces: Vec<u64> = selected
+            .iter()
+            .filter(|tx| tx.tx.sender == addr_a)
+            .map(|tx| tx.tx.nonce)
+            .collect();
+
+        assert_eq!(a_nonces, vec![0, 1]);
     }
 }

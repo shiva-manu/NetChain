@@ -1,4 +1,5 @@
 use crate::transaction::{SignedTransaction, Transaction};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Errors that can occur during state transitions.
@@ -12,7 +13,7 @@ pub enum StateError {
 }
 
 /// Account state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Account {
     pub balance: u64,
     pub nonce: u64,
@@ -25,7 +26,7 @@ impl Account {
 }
 
 /// Global chain state (ledger).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     /// address -> account
     accounts: HashMap<String, Account>,
@@ -44,6 +45,14 @@ impl State {
             accounts.insert(addr, Account::new(balance));
         }
         Self { accounts }
+    }
+
+    pub fn from_accounts(accounts: HashMap<String, Account>) -> Self {
+        Self { accounts }
+    }
+
+    pub fn snapshot_accounts(&self) -> HashMap<String, Account> {
+        self.accounts.clone()
     }
 
     pub fn get_balance(&self, address: &str) -> u64 {
