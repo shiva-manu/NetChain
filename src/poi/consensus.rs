@@ -1,4 +1,4 @@
-// src/consensus.rs
+// src/poi/consensus.rs
 use rand::Rng; // keep for testing helpers only
 use serde::{Deserialize, Serialize}; // For config serialization (optional)
 use std::collections::HashMap;
@@ -8,6 +8,13 @@ use std::collections::HashMap;
 pub struct PoiConfig {
     pub weights: Weights,
     pub thresholds: Thresholds,
+    /// How much stake influences validator selection vs PoI score (0.0 = pure PoI, 1.0 = pure stake)
+    #[serde(default = "default_stake_weight")]
+    pub stake_weight: f64,
+}
+
+fn default_stake_weight() -> f64 {
+    0.3
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -21,10 +28,10 @@ pub struct Weights {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Thresholds {
-    pub upload_mbps: f64,     // Max for normalization, e.g., 100.0
-    pub download_mbps: f64,   // e.g., 1000.0
-    pub latency_ms: f64,      // Max penalty at this, e.g., 200.0
-    pub uptime_percent: f64,  // Max, e.g., 100.0
+    pub upload_mbps: f64,       // Max for normalization, e.g., 100.0
+    pub download_mbps: f64,     // e.g., 1000.0
+    pub latency_ms: f64,        // Max penalty at this, e.g., 200.0
+    pub uptime_percent: f64,    // Max, e.g., 100.0
     pub stability_percent: f64, // Packet success rate, e.g., 100.0
 }
 
@@ -34,8 +41,8 @@ pub struct NodeMetrics {
     pub node_id: String, // e.g., pubkey hash
     pub upload_mbps: f64,
     pub download_mbps: f64,
-    pub latency_ms: f64,     // Avg RTT to peers
-    pub uptime_percent: f64, // Over last epoch (e.g., 99.5)
+    pub latency_ms: f64,        // Avg RTT to peers
+    pub uptime_percent: f64,    // Over last epoch (e.g., 99.5)
     pub stability_percent: f64, // % successful packets
 }
 
@@ -65,11 +72,18 @@ impl PoiScorer {
         Self { config }
     }
 
+    pub fn set_stake_weight(&mut self, stake_weight: f64) {
+        self.config.stake_weight = stake_weight.clamp(0.0, 1.0);
+    }
+
     /// Compute PoI score for a node (0.0 = useless, 1.0 = god-tier connection)
     pub fn poi_score(&self, metrics: &NodeMetrics) -> f64 {
         // Weighted sum of normalized metrics
-        let upload_norm =
-            NodeMetrics::normalize(metrics, metrics.upload_mbps, self.config.thresholds.upload_mbps);
+        let upload_norm = NodeMetrics::normalize(
+            metrics,
+            metrics.upload_mbps,
+            self.config.thresholds.upload_mbps,
+        );
         let download_norm = NodeMetrics::normalize(
             metrics,
             metrics.download_mbps,
@@ -80,8 +94,11 @@ impl PoiScorer {
             metrics.latency_ms,
             self.config.thresholds.latency_ms,
         );
-        let uptime_norm =
-            NodeMetrics::normalize(metrics, metrics.uptime_percent, self.config.thresholds.uptime_percent);
+        let uptime_norm = NodeMetrics::normalize(
+            metrics,
+            metrics.uptime_percent,
+            self.config.thresholds.uptime_percent,
+        );
         let stability_norm = NodeMetrics::normalize(
             metrics,
             metrics.stability_percent,
@@ -98,7 +115,22 @@ impl PoiScorer {
         score.clamp(0.0, 1.0)
     }
 
+    /// Compute combined weight for a validator: blends PoI score with normalized stake.
+    /// combined = (1 - stake_weight) * poi_score + stake_weight * (stake / max_stake)
+    /// If no one has stake, falls back to pure PoI.
+    pub fn combined_weight(&self, metrics: &NodeMetrics, stake: u64, max_stake: u64) -> f64 {
+        let poi = self.poi_score(metrics);
+        let stake_norm = if max_stake > 0 {
+            (stake as f64) / (max_stake as f64)
+        } else {
+            0.0
+        };
+        let sw = self.config.stake_weight.clamp(0.0, 1.0);
+        ((1.0 - sw) * poi + sw * stake_norm).max(0.0)
+    }
+
     /// Deterministic selection: choose validator using a shared `seed_u128`.
+    /// Accepts optional stake data to blend stake weight into selection.
     /// IMPORTANT: `seed_u128` must be derived the same way on all nodes for determinism.
     /// Example: u128::from_be_bytes(sha256(previous_block_hash || epoch) [0..16])
     pub fn select_validator_with_seed(
@@ -106,27 +138,43 @@ impl PoiScorer {
         pool: &HashMap<String, NodeMetrics>,
         seed_u128: u128,
     ) -> String {
+        self.select_validator_with_seed_and_stakes(pool, seed_u128, &HashMap::new())
+    }
+
+    /// Deterministic selection that factors in stake weights.
+    /// `stakes` maps node_id -> staked amount. Nodes not in the map are treated as 0 stake.
+    pub fn select_validator_with_seed_and_stakes(
+        &self,
+        pool: &HashMap<String, NodeMetrics>,
+        seed_u128: u128,
+        stakes: &HashMap<String, u64>,
+    ) -> String {
         if pool.is_empty() {
             panic!("No validators in pool!");
         }
 
-        // Compute cumulative weights
+        // CRITICAL: Sort by node_id for deterministic iteration across all nodes.
+        let mut sorted_entries: Vec<(&String, &NodeMetrics)> = pool.iter().collect();
+        sorted_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        // Find max stake for normalization
+        let max_stake = stakes.values().copied().max().unwrap_or(0);
+
+        // Compute cumulative weights in deterministic (sorted) order
         let mut cum_weights: Vec<(String, f64)> = Vec::with_capacity(pool.len());
         let mut total_weight = 0.0f64;
-        for (id, metrics) in pool.iter() {
-            let score = self.poi_score(metrics).max(0.0);
-            // scale to integer-space-like but keep f64
+        for (id, metrics) in &sorted_entries {
+            let stake = stakes.get(*id).copied().unwrap_or(0);
+            let score = self.combined_weight(metrics, stake, max_stake);
             let weight = score * 1_000.0;
             total_weight += weight;
-            cum_weights.push((id.clone(), total_weight));
+            cum_weights.push(((*id).clone(), total_weight));
         }
 
-        // If total weight is zero (all scores zero), fallback deterministically using lexicographic order + seed
+        // If total weight is zero (all scores zero), fallback deterministically using sorted order + seed
         if total_weight <= f64::EPSILON {
-            let mut ids: Vec<&String> = pool.keys().collect();
-            ids.sort();
-            let idx = (seed_u128 as usize) % ids.len();
-            return ids[idx].clone().to_owned();
+            let idx = (seed_u128 as usize) % sorted_entries.len();
+            return sorted_entries[idx].0.clone();
         }
 
         // Convert seed to fractional in [0,1)
@@ -143,26 +191,30 @@ impl PoiScorer {
     }
 
     /// Non-deterministic RNG helper (ONLY for local tests). For consensus use deterministic seed.
-    pub fn select_validator_rng<R: Rng>(&self, pool: &HashMap<String, NodeMetrics>, rng: &mut R) -> String {
+    pub fn select_validator_rng<R: Rng>(
+        &self,
+        pool: &HashMap<String, NodeMetrics>,
+        rng: &mut R,
+    ) -> String {
         if pool.is_empty() {
             panic!("No validators in pool!");
         }
 
-        // compute cumulative weights
+        // Sort for consistent behavior even in test helper
+        let mut sorted_entries: Vec<(&String, &NodeMetrics)> = pool.iter().collect();
+        sorted_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
         let mut cum_weights: Vec<(String, f64)> = Vec::with_capacity(pool.len());
         let mut total_weight = 0.0f64;
-        for (id, metrics) in pool.iter() {
+        for (id, metrics) in &sorted_entries {
             let score = self.poi_score(metrics).max(0.0);
             let weight = score * 1_000.0;
             total_weight += weight;
-            cum_weights.push((id.clone(), total_weight));
+            cum_weights.push(((*id).clone(), total_weight));
         }
 
         if total_weight <= f64::EPSILON {
-            // fallback: deterministic lexicographic pick
-            let mut ids: Vec<&String> = pool.keys().collect();
-            ids.sort();
-            return ids[0].clone().to_owned();
+            return sorted_entries[0].0.clone();
         }
 
         let pick = rng.gen_range(0.0..total_weight);
@@ -174,21 +226,13 @@ impl PoiScorer {
     }
 
     /// Epoch update: Re-score all nodes (call every N blocks)
-    pub fn update_epoch(&mut self, pool: &mut HashMap<String, NodeMetrics>) -> HashMap<String, f64> {
+    pub fn update_epoch(
+        &mut self,
+        pool: &mut HashMap<String, NodeMetrics>,
+    ) -> HashMap<String, f64> {
         pool.iter()
             .map(|(id, metrics)| (id.clone(), self.poi_score(metrics)))
             .collect()
-    }
-}
-
-// Helper trait for RNG (for testing/mocking) — now returns String
-trait WeightedSelect {
-    fn select_validator<R: Rng>(&self, pool: &HashMap<String, NodeMetrics>, rng: &mut R) -> String;
-}
-
-impl WeightedSelect for PoiScorer {
-    fn select_validator<R: Rng>(&self, pool: &HashMap<String, NodeMetrics>, rng: &mut R) -> String {
-        self.select_validator_rng(pool, rng)
     }
 }
 
@@ -214,6 +258,7 @@ mod tests {
                 uptime_percent: 100.0,
                 stability_percent: 100.0,
             },
+            stake_weight: 0.0, // Pure PoI for backward-compatible tests
         }
     }
 
@@ -230,7 +275,8 @@ mod tests {
             stability_percent: 100.0,
         };
         let score = scorer.poi_score(&metrics);
-        assert_eq!(score, 1.0);
+        // Use approximate comparison due to floating point precision
+        assert!((score - 1.0).abs() < f64::EPSILON * 10.0);
     }
 
     #[test]
@@ -278,11 +324,24 @@ mod tests {
             },
         );
 
-        // Use a fixed seed; the highest scorer ("A") should often be selected for most seeds.
+        // Use a fixed seed; the result must be deterministic across calls
         let seed: u128 = 0x123456789abcdef0u128;
-        let winner = scorer.select_validator_with_seed(&pool, seed);
-        // We expect a deterministic output. We assert that winner is one of A/B/C
-        assert!(["A", "B", "C"].contains(&winner.as_str()));
+        let winner1 = scorer.select_validator_with_seed(&pool, seed);
+        let winner2 = scorer.select_validator_with_seed(&pool, seed);
+        assert_eq!(
+            winner1, winner2,
+            "Same seed must always produce same validator"
+        );
+
+        // Different seeds may produce different validators (but result must be valid)
+        let winner3 = scorer.select_validator_with_seed(&pool, 0u128);
+        assert!(["A", "B", "C"].contains(&winner3.as_str()));
+
+        // Run 100 times with different seeds to verify consistency (no panics, always valid)
+        for seed in 0u128..100 {
+            let w = scorer.select_validator_with_seed(&pool, seed);
+            assert!(["A", "B", "C"].contains(&w.as_str()));
+        }
 
         // Also test rng helper (local only)
         let mut rng = thread_rng();
@@ -299,6 +358,7 @@ mod tests {
         config.thresholds.latency_ms = 0.0001;
         config.thresholds.uptime_percent = 0.0001;
         config.thresholds.stability_percent = 0.0001;
+        config.stake_weight = 0.0;
 
         let scorer = PoiScorer::new(config);
         let mut pool: HashMap<String, NodeMetrics> = HashMap::new();
@@ -329,5 +389,133 @@ mod tests {
         let seed = 42u128;
         let winner = scorer.select_validator_with_seed(&pool, seed);
         assert!(["x", "y"].contains(&winner.as_str()));
+    }
+
+    #[test]
+    fn test_stake_weighted_selection_favors_higher_stake() {
+        let mut config = build_test_config();
+        config.stake_weight = 1.0; // Pure stake-based selection
+
+        let scorer = PoiScorer::new(config);
+        let mut pool: HashMap<String, NodeMetrics> = HashMap::new();
+
+        // All nodes have identical PoI metrics
+        for id in &["A", "B", "C"] {
+            pool.insert(
+                id.to_string(),
+                NodeMetrics {
+                    node_id: id.to_string(),
+                    upload_mbps: 50.0,
+                    download_mbps: 500.0,
+                    latency_ms: 30.0,
+                    uptime_percent: 99.0,
+                    stability_percent: 98.0,
+                },
+            );
+        }
+
+        let mut stakes = HashMap::new();
+        stakes.insert("A".to_string(), 100u64);
+        stakes.insert("B".to_string(), 1000u64); // B has 10x more stake
+        stakes.insert("C".to_string(), 10u64);
+
+        // Run 1000 selections with different seeds and count wins
+        let mut wins: HashMap<String, u32> = HashMap::new();
+        for i in 0u128..1000 {
+            // Spread seeds across the full u128 range for proper coverage
+            let seed = i.wrapping_mul(u128::MAX / 1000);
+            let winner = scorer.select_validator_with_seed_and_stakes(&pool, seed, &stakes);
+            *wins.entry(winner).or_insert(0) += 1;
+        }
+
+        // B should win significantly more often than A or C due to higher stake
+        let b_wins = *wins.get("B").unwrap_or(&0);
+        let a_wins = *wins.get("A").unwrap_or(&0);
+        let c_wins = *wins.get("C").unwrap_or(&0);
+        assert!(
+            b_wins > a_wins && b_wins > c_wins,
+            "B (stake=1000) should win most: A={}, B={}, C={}",
+            a_wins,
+            b_wins,
+            c_wins,
+        );
+    }
+
+    #[test]
+    fn test_combined_weight_blending() {
+        let mut config = build_test_config();
+        config.stake_weight = 0.5; // Equal blend
+
+        let scorer = PoiScorer::new(config);
+
+        // Perfect PoI metrics, no stake
+        let metrics = NodeMetrics {
+            node_id: "test".to_string(),
+            upload_mbps: 100.0,
+            download_mbps: 1000.0,
+            latency_ms: 0.0,
+            uptime_percent: 100.0,
+            stability_percent: 100.0,
+        };
+
+        // With 0 stake and max_stake > 0, stake component is 0
+        let w1 = scorer.combined_weight(&metrics, 0, 1000);
+        assert!(
+            (w1 - 0.5).abs() < 0.01,
+            "Expected ~0.5 (poi=1.0*0.5 + stake=0*0.5), got {}",
+            w1
+        );
+
+        // With max stake, both components are 1.0
+        let w2 = scorer.combined_weight(&metrics, 1000, 1000);
+        assert!((w2 - 1.0).abs() < 0.01, "Expected ~1.0, got {}", w2);
+
+        // With half stake
+        let w3 = scorer.combined_weight(&metrics, 500, 1000);
+        assert!(
+            (w3 - 0.75).abs() < 0.01,
+            "Expected ~0.75 (0.5 + 0.25), got {}",
+            w3
+        );
+    }
+
+    #[test]
+    fn test_stake_weighted_selection_deterministic() {
+        let mut config = build_test_config();
+        config.stake_weight = 0.5;
+
+        let scorer = PoiScorer::new(config);
+        let mut pool: HashMap<String, NodeMetrics> = HashMap::new();
+        pool.insert(
+            "A".to_string(),
+            NodeMetrics {
+                node_id: "A".to_string(),
+                upload_mbps: 50.0,
+                download_mbps: 500.0,
+                latency_ms: 30.0,
+                uptime_percent: 99.0,
+                stability_percent: 98.0,
+            },
+        );
+        pool.insert(
+            "B".to_string(),
+            NodeMetrics {
+                node_id: "B".to_string(),
+                upload_mbps: 50.0,
+                download_mbps: 500.0,
+                latency_ms: 30.0,
+                uptime_percent: 99.0,
+                stability_percent: 98.0,
+            },
+        );
+
+        let mut stakes = HashMap::new();
+        stakes.insert("A".to_string(), 500u64);
+        stakes.insert("B".to_string(), 200u64);
+
+        let seed = 0xdeadbeef_u128;
+        let w1 = scorer.select_validator_with_seed_and_stakes(&pool, seed, &stakes);
+        let w2 = scorer.select_validator_with_seed_and_stakes(&pool, seed, &stakes);
+        assert_eq!(w1, w2, "Same seed + stakes must produce same result");
     }
 }

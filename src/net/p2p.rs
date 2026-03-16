@@ -1,31 +1,113 @@
-// src/p2p.rs
+// src/net/p2p.rs
 
 use libp2p::futures::StreamExt;
 
 use libp2p::{
-    PeerId, identity,
-    swarm::{Swarm, SwarmEvent},
     gossipsub::{
-        Behaviour as Gossipsub,
-        Event as GossipsubEvent,
-        MessageAuthenticity,
-        IdentTopic as Topic,
-        Config as GossipsubConfig,
+        Behaviour as Gossipsub, Config as GossipsubConfig, Event as GossipsubEvent,
+        IdentTopic as Topic, MessageAuthenticity,
     },
+    identity,
     mdns::{tokio::Behaviour as Mdns, Event as MdnsEvent},
     noise,
-    tcp,
-    yamux,
-    Transport,
+    swarm::{Swarm, SwarmEvent},
+    tcp, yamux, PeerId, Transport,
 };
 
 use libp2p::swarm::derive_prelude::*;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
+/// Network message types for gossip protocol
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
     Block(String),
     Transaction(String),
+    /// Chain sync: request blocks from height
+    ChainSyncRequest {
+        from_height: u64,
+    },
+    /// Chain sync: response with blocks
+    ChainSyncResponse {
+        blocks: Vec<String>,
+    },
+
+    // ===== Proof of Internet Metric Messages =====
+    /// Challenge a peer to prove their internet metrics
+    /// The challenger generates a random nonce and requests the peer to prove their bandwidth
+    MetricChallenge {
+        /// Who issued the challenge
+        challenger_id: String,
+        /// Who is being challenged
+        target_id: String,
+        /// Random nonce for this challenge (prevents replay)
+        challenge_nonce: String,
+        /// Bytes the target should download from challenger (for upload speed proof)
+        bytes_to_download: usize,
+        /// Timestamp when challenge was issued
+        timestamp: u64,
+    },
+
+    /// Response to a metric challenge with measured values
+    MetricChallengeResponse {
+        /// Original challenge nonce
+        challenge_nonce: String,
+        /// Who responded
+        responder_id: String,
+        /// Measured download speed (Mbps) during challenge
+        download_mbps: f64,
+        /// Measured upload speed (Mbps) during challenge
+        upload_mbps: f64,
+        /// Measured latency to challenger (ms)
+        latency_ms: f64,
+        /// Bytes actually transferred
+        bytes_transferred: usize,
+        /// Duration of the test (ms)
+        duration_ms: u64,
+        /// Timestamp of response
+        timestamp: u64,
+    },
+
+    /// Attestation from a peer vouching for another peer's metrics
+    /// Peers attest to metrics they've personally verified through challenges
+    MetricAttestation {
+        /// Who is attesting (the verifier)
+        attester_id: String,
+        /// Who is being attested (the subject)
+        subject_id: String,
+        /// Attested download speed (Mbps)
+        download_mbps: f64,
+        /// Attested upload speed (Mbps)
+        upload_mbps: f64,
+        /// Attested latency (ms)
+        latency_ms: f64,
+        /// Confidence score (0.0-1.0) based on verification quality
+        confidence: f64,
+        /// Timestamp of attestation
+        timestamp: u64,
+        /// Signature over the attestation data (hex-encoded)
+        signature: String,
+    },
+
+    /// Broadcast self-reported metrics (to be verified by peers)
+    MetricAnnouncement {
+        /// Node announcing its metrics
+        node_id: String,
+        /// Claimed download speed (Mbps)
+        download_mbps: f64,
+        /// Claimed upload speed (Mbps)
+        upload_mbps: f64,
+        /// Claimed average latency (ms)
+        latency_ms: f64,
+        /// Claimed uptime percentage
+        uptime_percent: f64,
+        /// Claimed stability percentage
+        stability_percent: f64,
+        /// Timestamp
+        timestamp: u64,
+        /// How many peer attestations this node has received
+        attestation_count: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -65,6 +147,8 @@ pub struct P2PService {
     pub swarm: Swarm<NetBehaviour>,
     block_topic: Topic,
     tx_topic: Topic,
+    sync_topic: Topic,
+    metrics_topic: Topic,
 }
 
 impl P2PService {
@@ -81,13 +165,18 @@ impl P2PService {
         let mut gossipsub = Gossipsub::new(
             MessageAuthenticity::Signed(local_key),
             GossipsubConfig::default(),
-        ).map_err(|e| anyhow::anyhow!(e))?;
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
         let block_topic = Topic::new("blocks");
         let tx_topic = Topic::new("transactions");
+        let sync_topic = Topic::new("sync");
+        let metrics_topic = Topic::new("metrics");
 
         gossipsub.subscribe(&block_topic)?;
         gossipsub.subscribe(&tx_topic)?;
+        gossipsub.subscribe(&sync_topic)?;
+        gossipsub.subscribe(&metrics_topic)?;
 
         let mdns = Mdns::new(Default::default(), peer_id)?;
 
@@ -107,29 +196,54 @@ impl P2PService {
             swarm,
             block_topic,
             tx_topic,
+            sync_topic,
+            metrics_topic,
         })
     }
 
     pub async fn run(&mut self, sender: mpsc::Sender<P2PEvent>) {
         loop {
             match self.swarm.select_next_some().await {
-                SwarmEvent::Behaviour(OutEvent::Gossip(
-                    GossipsubEvent::Message { message, .. },
-                )) => {
-                    let msg = String::from_utf8_lossy(&message.data).to_string();
-                    let _ = sender
-                        .send(P2PEvent::Message(NetworkMessage::Block(msg)))
-                        .await;
+                SwarmEvent::Behaviour(OutEvent::Gossip(GossipsubEvent::Message {
+                    message,
+                    ..
+                })) => {
+                    let topic = message.topic.as_str();
+                    let data = String::from_utf8_lossy(&message.data).to_string();
+
+                    let network_msg = match topic {
+                        "blocks" => NetworkMessage::Block(data),
+                        "transactions" => NetworkMessage::Transaction(data),
+                        "sync" | "metrics" => {
+                            // Try to parse as structured message (sync or metrics)
+                            if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&data) {
+                                msg
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    };
+
+                    let _ = sender.send(P2PEvent::Message(network_msg)).await;
                 }
 
                 SwarmEvent::Behaviour(OutEvent::Mdns(event)) => match event {
                     MdnsEvent::Discovered(list) => {
                         for (peer, _) in list {
+                            self.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .add_explicit_peer(&peer);
                             let _ = sender.send(P2PEvent::PeerConnected(peer)).await;
                         }
                     }
                     MdnsEvent::Expired(list) => {
                         for (peer, _) in list {
+                            self.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .remove_explicit_peer(&peer);
                             let _ = sender.send(P2PEvent::PeerDisconnected(peer)).await;
                         }
                     }
@@ -139,11 +253,190 @@ impl P2PService {
             }
         }
     }
-    pub fn publish_block(&mut self,block_json:String){
-        let _=self
-        .swarm
-        .behaviour_mut()
-        .gossipsub
-        .publish(self.block_topic.clone(),block_json.as_bytes());
+    pub fn publish_block(&mut self, block_json: String) {
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(self.block_topic.clone(), block_json.as_bytes());
+    }
+
+    /// Publish a transaction to the network
+    pub fn publish_transaction(&mut self, tx_json: String) {
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(self.tx_topic.clone(), tx_json.as_bytes());
+    }
+
+    /// Request chain sync from peers starting at given height
+    pub fn request_chain_sync(&mut self, from_height: u64) {
+        let msg = NetworkMessage::ChainSyncRequest { from_height };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.sync_topic.clone(), json.as_bytes());
+        }
+    }
+
+    /// Send chain sync response with blocks
+    pub fn send_chain_sync_response(&mut self, blocks: Vec<String>) {
+        let msg = NetworkMessage::ChainSyncResponse { blocks };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.sync_topic.clone(), json.as_bytes());
+        }
+    }
+
+    /// Get the local peer ID
+    pub fn local_peer_id(&self) -> String {
+        self.peer_id.to_string()
+    }
+
+    /// Get the current number of connected peers
+    pub fn connected_peer_count(&self) -> usize {
+        self.swarm.connected_peers().count()
+    }
+
+    // ===== Proof of Internet Metric Methods =====
+
+    /// Send a metric challenge to a specific peer
+    pub fn send_metric_challenge(
+        &mut self,
+        target_id: String,
+        challenge_nonce: String,
+        bytes_to_download: usize,
+    ) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let msg = NetworkMessage::MetricChallenge {
+            challenger_id: self.peer_id.to_string(),
+            target_id,
+            challenge_nonce,
+            bytes_to_download,
+            timestamp,
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.metrics_topic.clone(), json.as_bytes());
+        }
+    }
+
+    /// Respond to a metric challenge with measured results
+    pub fn send_metric_response(
+        &mut self,
+        challenge_nonce: String,
+        download_mbps: f64,
+        upload_mbps: f64,
+        latency_ms: f64,
+        bytes_transferred: usize,
+        duration_ms: u64,
+    ) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let msg = NetworkMessage::MetricChallengeResponse {
+            challenge_nonce,
+            responder_id: self.peer_id.to_string(),
+            download_mbps,
+            upload_mbps,
+            latency_ms,
+            bytes_transferred,
+            duration_ms,
+            timestamp,
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.metrics_topic.clone(), json.as_bytes());
+        }
+    }
+
+    /// Publish an attestation vouching for a peer's metrics
+    pub fn send_metric_attestation(
+        &mut self,
+        subject_id: String,
+        download_mbps: f64,
+        upload_mbps: f64,
+        latency_ms: f64,
+        confidence: f64,
+        signature: String,
+    ) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let msg = NetworkMessage::MetricAttestation {
+            attester_id: self.peer_id.to_string(),
+            subject_id,
+            download_mbps,
+            upload_mbps,
+            latency_ms,
+            confidence,
+            timestamp,
+            signature,
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.metrics_topic.clone(), json.as_bytes());
+        }
+    }
+
+    /// Announce self-reported metrics to the network
+    pub fn announce_metrics(
+        &mut self,
+        download_mbps: f64,
+        upload_mbps: f64,
+        latency_ms: f64,
+        uptime_percent: f64,
+        stability_percent: f64,
+        attestation_count: usize,
+    ) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let msg = NetworkMessage::MetricAnnouncement {
+            node_id: self.peer_id.to_string(),
+            download_mbps,
+            upload_mbps,
+            latency_ms,
+            uptime_percent,
+            stability_percent,
+            timestamp,
+            attestation_count,
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(self.metrics_topic.clone(), json.as_bytes());
+        }
     }
 }

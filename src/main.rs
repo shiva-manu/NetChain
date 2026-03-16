@@ -1,105 +1,1164 @@
 // src/main.rs
 
-mod block;
-mod blockchain;
-mod p2p;
-
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Duration};
+use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio::time::{interval, sleep, Duration};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
-use block::Block;
-use blockchain::Blockchain;
-use p2p::{NetworkMessage, P2PEvent, P2PService};
+use netchain::anti_gaming::{self, AntiGamingService};
+use netchain::block::Block;
+use netchain::blockchain::Blockchain;
+use netchain::config::AppConfig;
+use netchain::consensus;
+use netchain::measurement::MeasurementService;
+use netchain::mempool::Mempool;
+use netchain::metrics_aggregator::{Attestation, MetricsAggregator};
+use netchain::monitoring::{start_monitoring_server, MonitoringState};
+use netchain::p2p::{NetworkMessage, P2PEvent, P2PService};
+use netchain::producer::{BlockProducer, ProducerConfig};
+use netchain::rpc::{start_rpc_server, RpcState};
+use netchain::state::State;
+use netchain::storage::Storage;
+use netchain::transaction::SignedTransaction;
+use netchain::websocket::{self, start_ws_server, WsEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("⚡ Starting NetChain (development mode)");
+    let config = AppConfig::load()?;
 
-    // Shared blockchain state
-    let blockchain = Arc::new(Mutex::new(Blockchain::new()));
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(config.node.log_level.clone())),
+        )
+        .with_target(false)
+        .init();
+
+    info!("starting NetChain node");
+
+    // Initialize persistent storage
+    let data_dir = config.data_dir();
+
+    info!(path = %data_dir.display(), "using data directory");
+    let storage = Arc::new(Storage::open(&data_dir)?);
+
+    // Load or create blockchain
+    let blockchain = {
+        let blocks = storage.load_all_blocks()?;
+        if blocks.is_empty() {
+            info!("creating new blockchain with genesis block");
+            Arc::new(Mutex::new(Blockchain::new()))
+        } else {
+            info!(blocks = blocks.len(), "loaded blocks from storage");
+            let mut bc = Blockchain::new();
+            // Skip genesis (index 0) since Blockchain::new() creates it
+            for block in blocks.into_iter().filter(|b| b.index > 0) {
+                if let Err(e) = bc.validate_and_add_block(block) {
+                    warn!(error = %e, "failed to load block from storage");
+                }
+            }
+            Arc::new(Mutex::new(bc))
+        }
+    };
+
     {
         let bc = blockchain.lock().await;
-        println!("Genesis block: {:?}", bc.last_block());
+        info!(height = bc.height(), "chain initialized");
     }
 
-    // Channel: P2P → main
-    let (tx, mut rx) = mpsc::channel(100);
+    // Load or create state
+    let state = {
+        let loaded_state = storage.load_state()?;
+        if loaded_state.accounts.is_empty() {
+            info!("creating new state with genesis balances");
+            let mut state = State::with_genesis(vec![("genesis_account".to_string(), 1_000_000)]);
+            state.chain_params.block_reward = config.producer.block_reward;
+            state.chain_params.block_interval_secs = config.producer.block_interval_secs;
+            state.chain_params.max_txs_per_block = config.producer.max_txs_per_block;
+            state.chain_params.stake_weight = config.producer.stake_weight.clamp(0.0, 1.0);
+            Arc::new(Mutex::new(state))
+        } else {
+            info!(
+                accounts = loaded_state.accounts.len(),
+                "loaded state from storage"
+            );
+            Arc::new(Mutex::new(loaded_state))
+        }
+    };
+
+    // Initialize mempool
+    let mempool = Arc::new(Mutex::new(Mempool::new()));
+    info!("mempool initialized");
 
     // Start P2P networking
-    let port = 30333;
+    let port = config.node.p2p_port;
+
     let p2p = Arc::new(Mutex::new(P2PService::new(port).await?));
 
+    // Get local peer ID for producer config
+    let local_peer_id = {
+        let p2p_guard = p2p.lock().await;
+        p2p_guard.local_peer_id()
+    };
+    info!(peer_id = %local_peer_id, "local peer id initialized");
+
+    // Initialize block producer with PoI consensus
+    let producer_config = ProducerConfig {
+        max_txs_per_block: config.producer.max_txs_per_block,
+        block_interval_secs: config.producer.block_interval_secs,
+        node_id: local_peer_id.clone(),
+        block_reward: config.producer.block_reward,
+    };
+    let producer = Arc::new(Mutex::new(BlockProducer::with_stake_weight(
+        producer_config,
+        config.producer.stake_weight,
+    )));
+
+    // Register self as validator with default metrics
+    {
+        let mut producer_guard = producer.lock().await;
+        let metrics = BlockProducer::default_node_metrics(local_peer_id.clone());
+        producer_guard.register_self(metrics);
+        info!(score = ?producer_guard.get_my_score(), "registered local validator");
+    }
+
+    // ===== Initialize Proof of Internet (PoI) Services =====
+
+    // Measurement service for real internet speed testing
+    let measurement_config = config.measurement.clone();
+    let measurement_service = Arc::new(MeasurementService::new(measurement_config));
+    info!("measurement service initialized");
+
+    // Metrics aggregator for peer attestations and reputation
+    let aggregator_config = config.aggregator.clone();
+    let metrics_aggregator = Arc::new(Mutex::new(MetricsAggregator::new(aggregator_config)));
+
+    // Register self in aggregator
+    {
+        let mut agg = metrics_aggregator.lock().await;
+        agg.register_node(local_peer_id.clone());
+    }
+    info!("metrics aggregator initialized");
+
+    // Anti-gaming service for validation and rate limiting
+    let anti_gaming_config = config.anti_gaming.clone();
+    let anti_gaming = Arc::new(Mutex::new(AntiGamingService::new(anti_gaming_config)));
+    info!("anti-gaming protections enabled");
+
+    // Channel: P2P → main
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+
+    // Start P2P networking task
     let p2p_runner = p2p.clone();
     tokio::spawn(async move {
         let mut p2p = p2p_runner.lock().await;
         p2p.run(tx).await;
     });
 
-    println!("Node running on port {port}. Waiting for P2P events...\n");
+    info!(p2p_port = port, "node ready and waiting for p2p events");
 
-    // 🔥 TEMPORARY: create & broadcast a block after 10 seconds
-    let p2p_broadcast = p2p.clone();
-    let blockchain_broadcast = blockchain.clone();
+    // Start RPC server for wallet CLI
+    let rpc_state = Arc::new(RpcState {
+        blockchain: blockchain.clone(),
+        state: state.clone(),
+        mempool: mempool.clone(),
+        p2p: p2p.clone(),
+    });
+
+    let rpc_bind_addr = config.rpc.bind_addr.clone();
+    let rpc_port = config.rpc.port;
     tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+        if let Err(e) = start_rpc_server(rpc_state, &rpc_bind_addr, rpc_port).await {
+            error!(error = %e, "rpc server error");
+        }
+    });
 
-        println!("⛏️ Creating new block locally...");
+    if config.monitoring.enabled {
+        let monitoring_state = Arc::new(MonitoringState {
+            blockchain: blockchain.clone(),
+            mempool: mempool.clone(),
+            p2p: p2p.clone(),
+            producer: producer.clone(),
+            aggregator: metrics_aggregator.clone(),
+            started_at: Instant::now(),
+        });
+        let monitoring_bind_addr = config.monitoring.bind_addr.clone();
+        let monitoring_port = config.monitoring.port;
 
-        let block = {
-            let mut bc = blockchain_broadcast.lock().await;
-            bc.add_block("Hello from NetChain".to_string())
-        };
+        tokio::spawn(async move {
+            if let Err(e) =
+                start_monitoring_server(monitoring_state, &monitoring_bind_addr, monitoring_port)
+                    .await
+            {
+                error!(error = %e, "monitoring server error");
+            }
+        });
+    }
 
-        let json = serde_json::to_string(&block).unwrap();
+    // ===== WebSocket Event Channel =====
+    let ws_event_tx = websocket::create_event_channel();
 
-        let mut p2p = p2p_broadcast.lock().await;
-        p2p.publish_block(json);
+    if config.websocket.enabled {
+        let ws_bind_addr = config.websocket.bind_addr.clone();
+        let ws_port = config.websocket.port;
+        let ws_tx = ws_event_tx.clone();
 
-        println!("📡 Block broadcasted");
+        tokio::spawn(async move {
+            if let Err(e) = start_ws_server(&ws_bind_addr, ws_port, ws_tx).await {
+                error!(error = %e, "websocket server error");
+            }
+        });
+    }
+
+    // ===== Periodic Metric Measurement Task =====
+    // Measures own internet performance periodically and announces to network
+    let measurement_task = measurement_service.clone();
+    let aggregator_task = metrics_aggregator.clone();
+    let p2p_metrics = p2p.clone();
+    let local_id_metrics = local_peer_id.clone();
+    let measurement_interval_secs = config.producer.metric_measurement_interval_secs;
+
+    tokio::spawn(async move {
+        let mut measurement_interval = interval(Duration::from_secs(measurement_interval_secs));
+
+        loop {
+            measurement_interval.tick().await;
+
+            // Run measurement cycle
+            let metrics = measurement_task.run_measurement_cycle().await;
+
+            // Update self-reported metrics in aggregator
+            {
+                let mut agg = aggregator_task.lock().await;
+                agg.update_self_reported(
+                    &local_id_metrics,
+                    metrics.download_mbps,
+                    metrics.upload_mbps,
+                    metrics.latency_ms,
+                    metrics.uptime_percent,
+                    metrics.stability_percent,
+                );
+            }
+
+            // Announce metrics to network
+            {
+                let mut p2p_guard = p2p_metrics.lock().await;
+                p2p_guard.announce_metrics(
+                    metrics.download_mbps,
+                    metrics.upload_mbps,
+                    metrics.latency_ms,
+                    metrics.uptime_percent,
+                    metrics.stability_percent,
+                    0, // attestation_count starts at 0
+                );
+            }
+
+            if metrics.sample_count > 0 {
+                info!(
+                    download_mbps = metrics.download_mbps,
+                    upload_mbps = metrics.upload_mbps,
+                    latency_ms = metrics.latency_ms,
+                    "metrics updated"
+                );
+            }
+        }
+    });
+
+    // Block production task (runs every block_interval_secs)
+    let p2p_producer = p2p.clone();
+    let blockchain_producer = blockchain.clone();
+    let mempool_producer = mempool.clone();
+    let state_producer = state.clone();
+    let producer_task = producer.clone();
+    let storage_producer = storage.clone();
+    let aggregator_epoch = metrics_aggregator.clone();
+    let ws_tx_producer = ws_event_tx.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let block_interval_secs = {
+                let state_guard = state_producer.lock().await;
+                state_guard.chain_params.block_interval_secs.max(1)
+            };
+            sleep(Duration::from_secs(block_interval_secs)).await;
+
+            let mut producer_guard = producer_task.lock().await;
+
+            if let Some((new_block, txs, executed_proposals)) = producer_guard
+                .produce_block(
+                    &blockchain_producer,
+                    &mempool_producer,
+                    &state_producer,
+                    &ws_tx_producer,
+                )
+                .await
+            {
+                let block_height = new_block.index;
+                info!(
+                    block_height,
+                    tx_count = txs.len(),
+                    proposals_executed = executed_proposals.len(),
+                    "produced block"
+                );
+
+                // Save block to storage
+                if let Err(e) = storage_producer.save_block(&new_block) {
+                    error!(error = %e, "failed to save produced block");
+                }
+
+                // Save state to storage
+                {
+                    let state_guard = state_producer.lock().await;
+                    if let Err(e) = storage_producer.save_state(&state_guard) {
+                        error!(error = %e, "failed to save state after block production");
+                    }
+                }
+
+                // Remove included transactions from mempool
+                if !txs.is_empty() {
+                    let mut mempool_guard = mempool_producer.lock().await;
+                    mempool_guard.remove_transactions(&txs);
+                }
+
+                // Broadcast block
+                let json = serde_json::to_string(&new_block).unwrap();
+                let mut p2p_guard = p2p_producer.lock().await;
+                p2p_guard.publish_block(json);
+                info!(block_height, "broadcasted block");
+
+                // Broadcast new block to WebSocket subscribers
+                let _ = ws_tx_producer.send(WsEvent::NewBlock {
+                    index: new_block.index,
+                    hash: new_block.hash.clone(),
+                    validator: new_block.validator.clone(),
+                    tx_count: txs.len(),
+                    timestamp: new_block.timestamp.to_rfc3339(),
+                });
+
+                // Check for epoch boundary
+                {
+                    let mut agg = aggregator_epoch.lock().await;
+                    if agg.should_start_new_epoch(block_height) {
+                        let snapshot = agg.end_epoch(block_height);
+                        info!(
+                            epoch = snapshot.epoch_number,
+                            end_block = snapshot.end_block,
+                            nodes = snapshot.node_scores.len(),
+                            "metrics epoch ended"
+                        );
+                    }
+                }
+            }
+        }
     });
 
     // Main event loop
+    let storage_main = storage.clone();
+    let ws_tx_main = ws_event_tx.clone();
     while let Some(event) = rx.recv().await {
         match event {
             P2PEvent::Message(NetworkMessage::Block(block_json)) => {
-                println!("📦 Received block data");
+                info!("received block data");
 
                 match serde_json::from_str::<Block>(&block_json) {
                     Ok(block) => {
                         let mut bc = blockchain.lock().await;
-                        match bc.validate_and_add_block(block) {
-                            Ok(_) => {
-                                println!(
-                                    "✅ Block accepted. Chain height: {}",
-                                    bc.chain.len() - 1
-                                );
+                        let block_index = block.index;
+                        let tx_count = block.transactions.len();
+
+                        // Basic block validity (header, hash, merkle root, tx signatures) against our tip.
+                        if let Err(e) = bc.validate_next_block(&block) {
+                            warn!(error = %e, "rejected block");
+                            continue;
+                        }
+
+                        let block_time_secs: u64 = match block.timestamp.timestamp().try_into() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                warn!("rejected block: timestamp before unix epoch");
+                                continue;
                             }
-                            Err(e) => {
-                                println!("❌ Block rejected: {e}");
+                        };
+
+                        // Validate and apply state transition atomically. Reject the block if any tx fails.
+                        {
+                            let mut state_guard = state.lock().await;
+
+                            // Enforce runtime chain parameters.
+                            if tx_count > state_guard.chain_params.max_txs_per_block {
+                                warn!(
+                                    tx_count,
+                                    max_txs = state_guard.chain_params.max_txs_per_block,
+                                    "rejected block: too many transactions"
+                                );
+                                continue;
+                            }
+
+                            let mut next_state = state_guard.clone();
+                            let mut tx_error = None;
+                            for tx in &block.transactions {
+                                if let Err(e) = next_state.apply_transaction_at(tx, block_time_secs)
+                                {
+                                    tx_error = Some(e);
+                                    break;
+                                }
+                            }
+
+                            if let Some(e) = tx_error {
+                                warn!(error = ?e, "rejected block: invalid transaction");
+                                continue;
+                            }
+
+                            // Credit validator with fees + block reward (from current chain params).
+                            let block_reward = next_state.chain_params.block_reward;
+                            next_state.apply_block_rewards(
+                                &block.validator,
+                                &block.transactions,
+                                block_reward,
+                            );
+
+                            // Execute governance actions deterministically at block time.
+                            let executed_proposals =
+                                next_state.execute_passed_proposals_at(block_time_secs);
+
+                            *state_guard = next_state;
+
+                            for executed in executed_proposals {
+                                let _ = ws_tx_main.send(WsEvent::ProposalUpdate {
+                                    proposal_id: executed.proposal_id,
+                                    title: executed.title,
+                                    status: "Passed".to_string(),
+                                    yes_votes: executed.yes_votes,
+                                    no_votes: executed.no_votes,
+                                });
                             }
                         }
+
+                        // Commit block to chain after state transition succeeds.
+                        bc.chain.push(block.clone());
+                        info!(
+                            block_index,
+                            tx_count,
+                            chain_height = bc.height(),
+                            "accepted block"
+                        );
+
+                        // Remove included transactions from mempool
+                        if !block.transactions.is_empty() {
+                            let mut mempool_guard = mempool.lock().await;
+                            mempool_guard.remove_transactions(&block.transactions);
+                        }
+
+                        // Save block and state to storage
+                        if let Err(e) = storage_main.save_block(&block) {
+                            warn!(error = %e, "failed to persist accepted block");
+                        }
+                        {
+                            let state_guard = state.lock().await;
+                            if let Err(e) = storage_main.save_state(&state_guard) {
+                                warn!(error = %e, "failed to persist state after accepted block");
+                            }
+                        }
+
+                        // Broadcast new block event to WebSocket subscribers
+                        let _ = ws_tx_main.send(WsEvent::NewBlock {
+                            index: block_index,
+                            hash: block.hash.clone(),
+                            validator: block.validator.clone(),
+                            tx_count,
+                            timestamp: block.timestamp.to_rfc3339(),
+                        });
                     }
                     Err(e) => {
-                        println!("❌ Failed to deserialize block: {e}");
+                        warn!(error = %e, "failed to deserialize block");
                     }
                 }
             }
 
-            P2PEvent::Message(NetworkMessage::Transaction(tx)) => {
-                println!("💸 Received transaction (not yet handled): {tx}");
+            P2PEvent::Message(NetworkMessage::Transaction(tx_json)) => {
+                info!("received transaction");
+
+                match serde_json::from_str::<SignedTransaction>(&tx_json) {
+                    Ok(signed_tx) => {
+                        let state_guard = state.lock().await;
+                        let mut mempool_guard = mempool.lock().await;
+
+                        match mempool_guard.add_transaction(signed_tx.clone(), &state_guard) {
+                            Ok(_) => {
+                                info!(
+                                    mempool_size = mempool_guard.len(),
+                                    "transaction added to mempool"
+                                );
+
+                                // Broadcast new transaction event to WebSocket subscribers
+                                let tx_type_str = format!("{:?}", signed_tx.tx.tx_type);
+                                let _ = ws_tx_main.send(WsEvent::NewTransaction {
+                                    tx_hash: signed_tx.tx_hash_hex(),
+                                    sender: signed_tx.tx.sender.clone(),
+                                    receiver: signed_tx.tx.receiver.clone(),
+                                    amount: signed_tx.tx.amount,
+                                    tx_type: tx_type_str,
+                                });
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "transaction rejected");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize transaction");
+                    }
+                }
+            }
+
+            P2PEvent::Message(NetworkMessage::ChainSyncRequest { from_height }) => {
+                info!(from_height, "received chain sync request");
+
+                let bc = blockchain.lock().await;
+                let blocks: Vec<String> = bc
+                    .get_blocks_from(from_height)
+                    .iter()
+                    .filter_map(|b| serde_json::to_string(b).ok())
+                    .collect();
+
+                if !blocks.is_empty() {
+                    let mut p2p_guard = p2p.lock().await;
+                    p2p_guard.send_chain_sync_response(blocks.clone());
+                    info!(blocks = blocks.len(), "sent chain sync response");
+                }
+            }
+
+            P2PEvent::Message(NetworkMessage::ChainSyncResponse { blocks }) => {
+                info!(blocks = blocks.len(), "received chain sync response");
+
+                let parsed_blocks: Vec<Block> = blocks
+                    .iter()
+                    .filter_map(|s| serde_json::from_str(s).ok())
+                    .collect();
+
+                if !parsed_blocks.is_empty() {
+                    let mut bc = blockchain.lock().await;
+                    let old_chain = bc.chain.clone();
+                    let old_height = bc.height();
+
+                    match bc.sync_from_blocks(parsed_blocks) {
+                        Ok(result) => {
+                            if result.added == 0 {
+                                continue;
+                            }
+
+                            let new_chain = bc.chain.clone();
+                            match rebuild_state_from_chain(&new_chain) {
+                                Ok(rebuilt_state) => {
+                                    {
+                                        let mut state_guard = state.lock().await;
+                                        *state_guard = rebuilt_state;
+                                    }
+
+                                    // Remove included transactions from mempool (best-effort).
+                                    {
+                                        let mut mempool_guard = mempool.lock().await;
+                                        if result.reorged {
+                                            for block in &new_chain {
+                                                mempool_guard
+                                                    .remove_transactions(&block.transactions);
+                                            }
+                                        } else {
+                                            for block in
+                                                new_chain.iter().filter(|b| b.index > old_height)
+                                            {
+                                                mempool_guard
+                                                    .remove_transactions(&block.transactions);
+                                            }
+                                        }
+                                    }
+
+                                    // Persist blocks + rebuilt state.
+                                    if result.reorged {
+                                        if let Err(e) = storage_main.clear() {
+                                            warn!(
+                                                error = %e,
+                                                "failed to clear storage after reorg"
+                                            );
+                                        }
+                                        for block in &new_chain {
+                                            if let Err(e) = storage_main.save_block(block) {
+                                                warn!(
+                                                    error = %e,
+                                                    index = block.index,
+                                                    "failed to persist synced block"
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        for block in
+                                            new_chain.iter().filter(|b| b.index > old_height)
+                                        {
+                                            if let Err(e) = storage_main.save_block(block) {
+                                                warn!(
+                                                    error = %e,
+                                                    index = block.index,
+                                                    "failed to persist synced block"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if let Err(e) = {
+                                        let state_guard = state.lock().await;
+                                        storage_main.save_state(&state_guard)
+                                    } {
+                                        warn!(
+                                            error = %e,
+                                            "failed to persist rebuilt state after sync"
+                                        );
+                                    }
+
+                                    if result.reorged {
+                                        info!(
+                                            added = result.added,
+                                            new_height = bc.height(),
+                                            "chain reorganized during sync"
+                                        );
+                                    } else {
+                                        info!(
+                                            added = result.added,
+                                            new_height = bc.height(),
+                                            "synced new blocks"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    // Reject sync if state transition is invalid.
+                                    bc.chain = old_chain;
+                                    warn!(
+                                        error = %e,
+                                        old_height,
+                                        "rejected synced chain: invalid state transition"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "chain sync failed");
+                        }
+                    }
+                }
             }
 
             P2PEvent::PeerConnected(peer) => {
-                println!("🔗 Peer connected: {peer}");
+                info!(peer = %peer, "peer connected");
+
+                // Register peer as potential validator with default metrics
+                {
+                    let mut producer_guard = producer.lock().await;
+                    let metrics = BlockProducer::default_node_metrics(peer.to_string());
+                    producer_guard.register_peer(peer.to_string(), metrics);
+                    info!(
+                        validators = producer_guard.validator_count(),
+                        "validator pool updated after peer connect"
+                    );
+                }
+
+                // Register peer in metrics aggregator
+                {
+                    let mut agg = metrics_aggregator.lock().await;
+                    agg.register_node(peer.to_string());
+                }
+
+                // Request chain sync from new peer
+                {
+                    let height = {
+                        let bc = blockchain.lock().await;
+                        bc.height()
+                    };
+                    let mut p2p_guard = p2p.lock().await;
+                    p2p_guard.request_chain_sync(height + 1);
+                    info!(from_height = height + 1, "requested chain sync from peer");
+
+                    // Issue a metric challenge to the new peer
+                    let nonce = format!("{:x}", rand::random::<u64>());
+                    p2p_guard.send_metric_challenge(
+                        peer.to_string(),
+                        nonce,
+                        1_000_000, // 1 MB challenge
+                    );
+                    info!(peer = %peer, "sent metric challenge to peer");
+                }
             }
 
             P2PEvent::PeerDisconnected(peer) => {
-                println!("❌ Peer disconnected: {peer}");
+                info!(peer = %peer, "peer disconnected");
+
+                // Remove peer from validator pool
+                {
+                    let mut producer_guard = producer.lock().await;
+                    producer_guard.remove_peer(&peer.to_string());
+                    info!(
+                        validators = producer_guard.validator_count(),
+                        "validator pool updated after peer disconnect"
+                    );
+                }
+
+                // Note: We don't remove from aggregator - keep historical metrics
+                // This allows reputation to persist across reconnections
+            }
+
+            // ===== Proof of Internet Metric Messages =====
+            P2PEvent::Message(NetworkMessage::MetricChallenge {
+                challenger_id,
+                target_id,
+                challenge_nonce,
+                bytes_to_download,
+                timestamp: _,
+            }) => {
+                let local_id = {
+                    let p2p_guard = p2p.lock().await;
+                    p2p_guard.local_peer_id()
+                };
+
+                // Only respond if we're the target
+                if target_id == local_id {
+                    info!(
+                        challenger_id,
+                        challenge_nonce, bytes_to_download, "received metric challenge"
+                    );
+
+                    // Check rate limiting
+                    let should_respond = {
+                        let mut ag = anti_gaming.lock().await;
+                        ag.can_receive_challenge(&challenger_id).is_valid()
+                    };
+
+                    if !should_respond {
+                        warn!(challenger_id, "rate limited metric challenge");
+                    } else {
+                        // Record that we received a challenge
+                        {
+                            let mut ag = anti_gaming.lock().await;
+                            ag.record_challenge_received(&challenger_id);
+                        }
+                        // Perform actual measurement using our measurement service
+                        let metrics = measurement_service.get_metrics().await;
+
+                        // If we have real measurements, use them; otherwise run a quick cycle
+                        let (download, upload, latency) = if metrics.sample_count > 0 {
+                            (
+                                metrics.download_mbps,
+                                metrics.upload_mbps,
+                                metrics.latency_ms,
+                            )
+                        } else {
+                            // Run a measurement cycle to get fresh data
+                            let fresh = measurement_service.run_measurement_cycle().await;
+                            (fresh.download_mbps, fresh.upload_mbps, fresh.latency_ms)
+                        };
+
+                        // Calculate approximate duration based on bytes and speed
+                        let duration_ms = if download > 0.0 {
+                            ((bytes_to_download as f64 * 8.0) / (download * 1_000_000.0) * 1000.0)
+                                as u64
+                        } else {
+                            1000
+                        };
+
+                        let mut p2p_guard = p2p.lock().await;
+                        p2p_guard.send_metric_response(
+                            challenge_nonce,
+                            download,
+                            upload,
+                            latency,
+                            bytes_to_download,
+                            duration_ms,
+                        );
+                        info!(
+                            download,
+                            upload, latency, duration_ms, "responded to metric challenge"
+                        );
+                    }
+                }
+            }
+
+            P2PEvent::Message(NetworkMessage::MetricChallengeResponse {
+                challenge_nonce,
+                responder_id,
+                download_mbps,
+                upload_mbps,
+                latency_ms,
+                bytes_transferred,
+                duration_ms,
+                timestamp,
+            }) => {
+                info!(
+                    responder_id,
+                    challenge_nonce,
+                    download_mbps,
+                    upload_mbps,
+                    latency_ms,
+                    bytes_transferred,
+                    duration_ms,
+                    "received metric challenge response"
+                );
+
+                let local_id = {
+                    let p2p_guard = p2p.lock().await;
+                    p2p_guard.local_peer_id()
+                };
+
+                // Validate metrics with anti-gaming
+                let validation = {
+                    let mut ag = anti_gaming.lock().await;
+                    // For response validation, use 0 attestations since this is raw measurement
+                    ag.validate_metrics(&responder_id, download_mbps, upload_mbps, latency_ms, 0)
+                };
+
+                if !validation.is_valid() {
+                    warn!(validation = ?validation, responder_id, "metric challenge response validation failed");
+                } else {
+                    // Verify the response makes sense (bytes/time roughly matches claimed speed)
+                    let claimed_speed = if duration_ms > 0 {
+                        (bytes_transferred as f64 * 8.0)
+                            / (duration_ms as f64 / 1000.0)
+                            / 1_000_000.0
+                    } else {
+                        0.0
+                    };
+
+                    // Allow 50% variance between claimed and calculated
+                    let speed_ratio = if download_mbps > 0.0 {
+                        claimed_speed / download_mbps
+                    } else {
+                        0.0
+                    };
+
+                    let confidence = if speed_ratio > 0.5 && speed_ratio < 2.0 {
+                        0.8 // Good confidence if speeds roughly match
+                    } else {
+                        0.3 // Low confidence if mismatch
+                    };
+
+                    // Create and store attestation
+                    let attestation = Attestation {
+                        attester_id: local_id.clone(),
+                        subject_id: responder_id.clone(),
+                        download_mbps,
+                        upload_mbps,
+                        latency_ms,
+                        confidence,
+                        timestamp,
+                        signature: String::new(), // TODO: Add proper signing
+                    };
+
+                    // Store in aggregator
+                    {
+                        let mut agg = metrics_aggregator.lock().await;
+                        match agg.add_attestation(attestation) {
+                            Ok(()) => info!(
+                                responder_id,
+                                confidence, "created attestation from metric challenge response"
+                            ),
+                            Err(e) => {
+                                warn!(error = %e, responder_id, "failed to store attestation")
+                            }
+                        }
+                    }
+
+                    // Broadcast attestation to network
+                    {
+                        let mut p2p_guard = p2p.lock().await;
+                        p2p_guard.send_metric_attestation(
+                            responder_id,
+                            download_mbps,
+                            upload_mbps,
+                            latency_ms,
+                            confidence,
+                            "".to_string(), // Signature placeholder - would need proper signing
+                        );
+                    }
+                }
+            }
+
+            P2PEvent::Message(NetworkMessage::MetricAttestation {
+                attester_id,
+                subject_id,
+                download_mbps,
+                upload_mbps,
+                latency_ms,
+                confidence,
+                timestamp,
+                signature: _,
+            }) => {
+                let local_id = {
+                    let p2p_guard = p2p.lock().await;
+                    p2p_guard.local_peer_id()
+                };
+
+                // Don't process our own attestations
+                if attester_id == local_id {
+                    continue;
+                }
+
+                info!(
+                    attester_id,
+                    subject_id,
+                    download_mbps,
+                    upload_mbps,
+                    latency_ms,
+                    confidence,
+                    "received metric attestation"
+                );
+
+                // Validate the attested values aren't obviously fake
+                let validation = {
+                    let ag = anti_gaming.lock().await;
+                    ag.validate_bounds(download_mbps, upload_mbps, latency_ms)
+                };
+
+                if !validation.is_valid() {
+                    warn!(validation = ?validation, subject_id, "rejected invalid attestation metrics");
+                } else {
+                    // Store the attestation
+                    let attestation = Attestation {
+                        attester_id: attester_id.clone(),
+                        subject_id: subject_id.clone(),
+                        download_mbps,
+                        upload_mbps,
+                        latency_ms,
+                        confidence,
+                        timestamp,
+                        signature: String::new(), // TODO: Verify signature
+                    };
+
+                    let mut agg = metrics_aggregator.lock().await;
+                    match agg.add_attestation(attestation) {
+                        Ok(()) => info!(subject_id, "stored attestation"),
+                        Err(e) => warn!(error = %e, subject_id, "failed to store attestation"),
+                    }
+                }
+            }
+
+            P2PEvent::Message(NetworkMessage::MetricAnnouncement {
+                node_id,
+                download_mbps,
+                upload_mbps,
+                latency_ms,
+                uptime_percent,
+                stability_percent,
+                timestamp: _,
+                attestation_count,
+            }) => {
+                let local_id = {
+                    let p2p_guard = p2p.lock().await;
+                    p2p_guard.local_peer_id()
+                };
+
+                // Don't process our own announcements
+                if node_id == local_id {
+                    continue;
+                }
+
+                info!(
+                    node_id,
+                    download_mbps,
+                    upload_mbps,
+                    latency_ms,
+                    uptime_percent,
+                    stability_percent,
+                    attestation_count,
+                    "received metric announcement"
+                );
+
+                // Validate with anti-gaming
+                let validation = {
+                    let mut ag = anti_gaming.lock().await;
+                    ag.validate_metrics(
+                        &node_id,
+                        download_mbps,
+                        upload_mbps,
+                        latency_ms,
+                        attestation_count,
+                    )
+                };
+
+                match validation {
+                    anti_gaming::ValidationResult::Valid => {
+                        // Update aggregator with self-reported metrics
+                        {
+                            let mut agg = metrics_aggregator.lock().await;
+                            agg.update_self_reported(
+                                &node_id,
+                                download_mbps,
+                                upload_mbps,
+                                latency_ms,
+                                uptime_percent,
+                                stability_percent,
+                            );
+                        }
+
+                        // Update validator pool with verified metrics
+                        {
+                            let mut prod = producer.lock().await;
+                            if prod.get_node_metrics(&node_id).is_some() {
+                                // Update with new values
+                                let updated = consensus::NodeMetrics {
+                                    node_id: node_id.clone(),
+                                    download_mbps,
+                                    upload_mbps,
+                                    latency_ms,
+                                    uptime_percent,
+                                    stability_percent,
+                                };
+                                prod.update_peer_metrics(&node_id, updated);
+                            }
+                        }
+                        info!(node_id, "accepted and stored announced metrics");
+                    }
+                    anti_gaming::ValidationResult::InsufficientAttestations => {
+                        info!(node_id, "insufficient attestations, issuing challenge");
+                        // Issue a challenge to verify
+                        let nonce = format!("{:x}", rand::random::<u64>());
+                        let mut p2p_guard = p2p.lock().await;
+                        p2p_guard.send_metric_challenge(
+                            node_id.clone(),
+                            nonce,
+                            1_000_000, // 1 MB
+                        );
+                    }
+                    other => {
+                        warn!(validation = ?other, node_id, "rejected announced metrics");
+                    }
+                }
             }
         }
     }
 
     Ok(())
+}
+
+fn rebuild_state_from_chain(chain: &[Block]) -> Result<State> {
+    // NOTE: This must match the node's genesis state initialization.
+    let mut state = State::with_genesis(vec![("genesis_account".to_string(), 1_000_000)]);
+
+    for block in chain.iter().filter(|b| b.index > 0) {
+        let block_time_secs: u64 = block.timestamp.timestamp().try_into().map_err(|_| {
+            anyhow::anyhow!("block timestamp before unix epoch (index {})", block.index)
+        })?;
+
+        // Enforce runtime chain parameters at each block boundary.
+        if block.transactions.len() > state.chain_params.max_txs_per_block {
+            return Err(anyhow::anyhow!(
+                "block {} has {} txs, exceeds max {}",
+                block.index,
+                block.transactions.len(),
+                state.chain_params.max_txs_per_block
+            ));
+        }
+
+        for tx in &block.transactions {
+            state
+                .apply_transaction_at(tx, block_time_secs)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "block {} contains invalid transaction: {:?}",
+                        block.index,
+                        e
+                    )
+                })?;
+        }
+
+        let block_reward = state.chain_params.block_reward;
+        state.apply_block_rewards(&block.validator, &block.transactions, block_reward);
+        state.execute_passed_proposals_at(block_time_secs);
+    }
+
+    Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use netchain::transaction::{
+        generate_ed25519_keypair, pubkey_to_address_hex, ProposalAction, SignedTransaction,
+        Transaction,
+    };
+
+    #[test]
+    fn test_rebuild_state_applies_governance_actions() {
+        let kp = generate_ed25519_keypair();
+        let addr = pubkey_to_address_hex(&kp.verifying_key());
+
+        let base_time = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let genesis = Block::new_at(0, vec![], "0".to_string(), "genesis".to_string(), base_time);
+
+        let reward_block_1 = Block::new_at(
+            1,
+            vec![],
+            genesis.hash.clone(),
+            addr.clone(),
+            base_time + chrono::Duration::seconds(1),
+        );
+        let reward_block_2 = Block::new_at(
+            2,
+            vec![],
+            reward_block_1.hash.clone(),
+            addr.clone(),
+            base_time + chrono::Duration::seconds(2),
+        );
+        let reward_block_3 = Block::new_at(
+            3,
+            vec![],
+            reward_block_2.hash.clone(),
+            addr.clone(),
+            base_time + chrono::Duration::seconds(3),
+        );
+
+        let stake_tx =
+            SignedTransaction::sign_with_keypair(&Transaction::stake(addr.clone(), 100, 1, 0), &kp);
+        let proposal_tx = SignedTransaction::sign_with_keypair(
+            &Transaction::create_proposal_with_action(
+                addr.clone(),
+                1,
+                1,
+                "Change reward".to_string(),
+                "Raise reward after restart".to_string(),
+                2,
+                ProposalAction::ChangeBlockReward(75),
+            ),
+            &kp,
+        );
+        let vote_tx = SignedTransaction::sign_with_keypair(
+            &Transaction::vote_proposal(addr.clone(), 1, 2, 1, true),
+            &kp,
+        );
+
+        let block1 = Block::new_at(
+            4,
+            vec![stake_tx, proposal_tx, vote_tx],
+            reward_block_3.hash.clone(),
+            addr.clone(),
+            base_time + chrono::Duration::seconds(4),
+        );
+        let block2 = Block::new_at(
+            5,
+            vec![],
+            block1.hash.clone(),
+            addr.clone(),
+            base_time + chrono::Duration::seconds(7),
+        );
+
+        let rebuilt = rebuild_state_from_chain(&[
+            genesis,
+            reward_block_1,
+            reward_block_2,
+            reward_block_3,
+            block1,
+            block2,
+        ])
+        .unwrap();
+        assert_eq!(rebuilt.chain_params.block_reward, 75);
+        assert!(rebuilt.get_proposal(1).is_none());
+    }
 }

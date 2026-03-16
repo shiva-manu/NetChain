@@ -1,0 +1,56 @@
+[node]
+data_dir = "./data"
+p2p_port = 30333
+log_level = "info"
+
+[rpc]
+bind_addr = "127.0.0.1"
+port = 8545
+
+[monitoring]
+enabled = true
+bind_addr = "127.0.0.1"
+port = 9090
+
+[websocket]
+enabled = true
+bind_addr = "127.0.0.1"
+port = 8546
+
+[producer]
+max_txs_per_block = 100
+block_interval_secs = 15
+block_reward = 50
+metric_measurement_interval_secs = 120
+stake_weight = 0.3
+
+[measurement]
+download_endpoints = ["https://speed.cloudflare.com/__down?bytes=10000000"]
+upload_endpoints = ["https://speed.cloudflare.com/__up"]
+timeout_secs = 30
+download_bytes = 10000000
+upload_bytes = 5000000
+history_size = 10
+min_interval_secs = 60
+
+[aggregator]
+min_attestations = 3
+attestation_max_age_secs = 3600
+reputation_history_epochs = 10
+self_report_weight = 0.2
+blocks_per_epoch = 100
+attestation_decay = 0.95
+
+[anti_gaming]
+outlier_threshold_sigma = 3.0
+min_trusted_attestations = 3
+max_challenges_per_hour = 60
+max_received_challenges_per_hour = 120
+history_size = 100
+suspicious_penalty = 0.5
+
+[anti_gaming.bounds]
+max_download_mbps = 10000.0
+max_upload_mbps = 10000.0
+min_latency_ms = 0.1
+max_latency_ms = 10000.0
