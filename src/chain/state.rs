@@ -382,7 +382,10 @@ impl State {
     }
 
     /// Apply a signed transaction (Mutates state)
-    pub fn apply_transaction(&mut self, tx: &SignedTransaction) -> Result<(), StateError> {
+    pub fn apply_transaction(
+        &mut self,
+        tx: &SignedTransaction,
+    ) -> Result<Option<StateEvent>, StateError> {
         let now = current_unix_timestamp();
         self.apply_transaction_at(tx, now)
     }
@@ -390,11 +393,12 @@ impl State {
     /// Apply a signed transaction at a deterministic "chain time" (seconds since epoch).
     ///
     /// IMPORTANT: For consensus-critical paths (block execution), pass the block timestamp.
+    /// Returns an optional `StateEvent` that callers can broadcast via WebSocket.
     pub fn apply_transaction_at(
         &mut self,
         tx: &SignedTransaction,
         now: u64,
-    ) -> Result<(), StateError> {
+    ) -> Result<Option<StateEvent>, StateError> {
         self.validate_transaction_at(tx, now)?;
 
         let t = &tx.tx;
@@ -406,13 +410,14 @@ impl State {
         sender.balance -= t.amount + t.fee;
         sender.nonce += 1;
 
-        match &t.tx_type {
+        let event = match &t.tx_type {
             TransactionType::Transfer => {
                 let receiver = self
                     .accounts
                     .entry(t.receiver.clone())
                     .or_insert(Account::new(0));
                 receiver.balance += t.amount;
+                None
             }
             TransactionType::Stake => {
                 let stake = self
@@ -420,6 +425,7 @@ impl State {
                     .entry(t.sender.clone())
                     .or_insert(StakePosition { amount: 0 });
                 stake.amount += t.amount;
+                None
             }
             TransactionType::Unstake => {
                 let stake = self
@@ -432,6 +438,7 @@ impl State {
                     .get_mut(&t.sender)
                     .expect("Sender must exist after validation");
                 sender.balance += t.amount;
+                None
             }
             TransactionType::CreateProposal {
                 title,
@@ -457,6 +464,11 @@ impl State {
                         action: action.clone(),
                     },
                 );
+                Some(StateEvent::ProposalCreated {
+                    proposal_id,
+                    title: title.clone(),
+                    proposer: t.sender.clone(),
+                })
             }
             TransactionType::VoteProposal {
                 proposal_id,
@@ -473,11 +485,19 @@ impl State {
                 } else {
                     proposal.no_votes += voting_power;
                 }
+                Some(StateEvent::VoteCast {
+                    proposal_id: *proposal_id,
+                    title: proposal.title.clone(),
+                    voter: t.sender.clone(),
+                    support: *support,
+                    yes_votes: proposal.yes_votes,
+                    no_votes: proposal.no_votes,
+                })
             }
-        }
+        };
 
         // Note: fee handling (burn / validator reward) happens at block level
-        Ok(())
+        Ok(event)
     }
 
     /// Apply multiple transactions atomically (used for blocks)
