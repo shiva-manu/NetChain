@@ -21,9 +21,41 @@ use netchain::p2p::{NetworkMessage, P2PEvent, P2PService};
 use netchain::producer::{BlockProducer, ProducerConfig};
 use netchain::rpc::{start_rpc_server, RpcState};
 use netchain::state::State;
+use netchain::state::StateEvent;
 use netchain::storage::Storage;
 use netchain::transaction::SignedTransaction;
 use netchain::websocket::{self, start_ws_server, WsEvent};
+
+/// Convert a `StateEvent` into a `WsEvent` for WebSocket broadcasting.
+fn state_event_to_ws(event: &StateEvent) -> WsEvent {
+    match event {
+        StateEvent::ProposalCreated {
+            proposal_id,
+            title,
+            proposer: _,
+        } => WsEvent::ProposalUpdate {
+            proposal_id: *proposal_id,
+            title: title.clone(),
+            status: "Created".to_string(),
+            yes_votes: 0,
+            no_votes: 0,
+        },
+        StateEvent::VoteCast {
+            proposal_id,
+            title,
+            voter: _,
+            support: _,
+            yes_votes,
+            no_votes,
+        } => WsEvent::ProposalUpdate {
+            proposal_id: *proposal_id,
+            title: title.clone(),
+            status: "VoteReceived".to_string(),
+            yes_votes: *yes_votes,
+            no_votes: *no_votes,
+        },
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -399,11 +431,18 @@ async fn main() -> Result<()> {
 
                             let mut next_state = state_guard.clone();
                             let mut tx_error = None;
+                            let mut tx_events = Vec::new();
                             for tx in &block.transactions {
-                                if let Err(e) = next_state.apply_transaction_at(tx, block_time_secs)
-                                {
-                                    tx_error = Some(e);
-                                    break;
+                                match next_state.apply_transaction_at(tx, block_time_secs) {
+                                    Ok(maybe_event) => {
+                                        if let Some(event) = maybe_event {
+                                            tx_events.push(event);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tx_error = Some(e);
+                                        break;
+                                    }
                                 }
                             }
 

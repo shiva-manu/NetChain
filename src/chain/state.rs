@@ -501,7 +501,10 @@ impl State {
     }
 
     /// Apply multiple transactions atomically (used for blocks)
-    pub fn apply_transactions(&mut self, txs: &[SignedTransaction]) -> Result<(), StateError> {
+    pub fn apply_transactions(
+        &mut self,
+        txs: &[SignedTransaction],
+    ) -> Result<Vec<StateEvent>, StateError> {
         let now = current_unix_timestamp();
         self.apply_transactions_at(txs, now)
     }
@@ -511,11 +514,14 @@ impl State {
         &mut self,
         txs: &[SignedTransaction],
         now: u64,
-    ) -> Result<(), StateError> {
+    ) -> Result<Vec<StateEvent>, StateError> {
+        let mut events = Vec::new();
         for tx in txs {
-            self.apply_transaction_at(tx, now)?;
+            if let Some(event) = self.apply_transaction_at(tx, now)? {
+                events.push(event);
+            }
         }
-        Ok(())
+        Ok(events)
     }
 
     /// Distribute block rewards to the validator:
