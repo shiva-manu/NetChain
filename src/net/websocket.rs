@@ -20,6 +20,7 @@ pub enum WsTopic {
     NewBlocks,
     NewTransactions,
     Proposals,
+    Slashing,
 }
 
 /// Events broadcast to WebSocket subscribers
@@ -50,6 +51,13 @@ pub enum WsEvent {
         yes_votes: u64,
         no_votes: u64,
     },
+    #[serde(rename = "validator_slashed")]
+    ValidatorSlashed {
+        validator: String,
+        reason: String,
+        amount_burned: u64,
+        remaining_stake: u64,
+    },
 }
 
 impl WsEvent {
@@ -58,6 +66,7 @@ impl WsEvent {
             WsEvent::NewBlock { .. } => WsTopic::NewBlocks,
             WsEvent::NewTransaction { .. } => WsTopic::NewTransactions,
             WsEvent::ProposalUpdate { .. } => WsTopic::Proposals,
+            WsEvent::ValidatorSlashed { .. } => WsTopic::Slashing,
         }
     }
 }
@@ -142,7 +151,7 @@ async fn handle_ws_connection(
     // Send welcome message
     let welcome = serde_json::json!({
         "type": "welcome",
-        "message": "Connected to NetChain WebSocket. Send {\"action\":\"subscribe\",\"topics\":[\"new_blocks\",\"new_transactions\",\"proposals\"]} to subscribe."
+        "message": "Connected to NetChain WebSocket. Send {\"action\":\"subscribe\",\"topics\":[\"new_blocks\",\"new_transactions\",\"proposals\",\"slashing\"]} to subscribe."
     });
     if let Err(e) = ws_sink
         .send(tokio_tungstenite::tungstenite::Message::Text(

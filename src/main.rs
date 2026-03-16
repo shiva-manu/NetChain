@@ -22,9 +22,19 @@ use netchain::producer::{BlockProducer, ProducerConfig};
 use netchain::rpc::{start_rpc_server, RpcState};
 use netchain::state::State;
 use netchain::state::StateEvent;
+use netchain::state::SlashReason;
 use netchain::storage::Storage;
 use netchain::transaction::SignedTransaction;
 use netchain::websocket::{self, start_ws_server, WsEvent};
+
+/// Convert a `SlashReason` to a human-readable string for WebSocket events.
+fn slash_reason_label(reason: &SlashReason) -> &'static str {
+    match reason {
+        SlashReason::InvalidBlockProposal => "InvalidBlockProposal",
+        SlashReason::MetricFraud => "MetricFraud",
+        SlashReason::MissedBlock => "MissedBlock",
+    }
+}
 
 /// Convert a `StateEvent` into a `WsEvent` for WebSocket broadcasting.
 fn state_event_to_ws(event: &StateEvent) -> WsEvent {
@@ -111,6 +121,7 @@ async fn main() -> Result<()> {
             state.chain_params.block_interval_secs = config.producer.block_interval_secs;
             state.chain_params.max_txs_per_block = config.producer.max_txs_per_block;
             state.chain_params.stake_weight = config.producer.stake_weight.clamp(0.0, 1.0);
+            state.slashing_config = config.slashing.clone();
             Arc::new(Mutex::new(state))
         } else {
             info!(
@@ -486,6 +497,33 @@ async fn main() -> Result<()> {
 
                             if let Some(e) = tx_error {
                                 warn!(error = ?e, "rejected block: invalid transaction");
+
+                                // Slash the validator for proposing an invalid block.
+                                let slash_reason = SlashReason::InvalidBlockProposal;
+                                let burned = state_guard.slash_stake(
+                                    &block.validator,
+                                    slash_reason.clone(),
+                                    block_time_secs,
+                                );
+                                if burned > 0 {
+                                    warn!(
+                                        validator = %block.validator,
+                                        burned,
+                                        "slashed validator for invalid block proposal"
+                                    );
+                                    let remaining = state_guard.get_staked_balance(&block.validator);
+                                    let _ = ws_tx_main.send(WsEvent::ValidatorSlashed {
+                                        validator: block.validator.clone(),
+                                        reason: slash_reason_label(&slash_reason).to_string(),
+                                        amount_burned: burned,
+                                        remaining_stake: remaining,
+                                    });
+                                    // Persist state after slashing.
+                                    if let Err(e) = storage_main.save_state(&state_guard) {
+                                        warn!(error = %e, "failed to persist state after slashing");
+                                    }
+                                }
+
                                 continue;
                             }
 

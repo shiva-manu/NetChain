@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::anti_gaming::AntiGamingConfig;
 use crate::measurement::MeasurementConfig;
 use crate::metrics_aggregator::AggregatorConfig;
+use crate::state::SlashingConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,6 +19,7 @@ pub struct AppConfig {
     pub measurement: MeasurementConfig,
     pub aggregator: AggregatorConfig,
     pub anti_gaming: AntiGamingConfig,
+    pub slashing: SlashingConfig,
 }
 
 impl Default for AppConfig {
@@ -31,6 +33,7 @@ impl Default for AppConfig {
             measurement: MeasurementConfig::default(),
             aggregator: AggregatorConfig::default(),
             anti_gaming: AntiGamingConfig::default(),
+            slashing: SlashingConfig::default(),
         }
     }
 }
@@ -121,6 +124,21 @@ impl AppConfig {
         if let Ok(value) = std::env::var("NETCHAIN_MEMPOOL_TTL_SECS") {
             if let Ok(parsed) = value.parse() {
                 self.producer.mempool_ttl_secs = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_SLASH_INVALID_BLOCK_BPS") {
+            if let Ok(parsed) = value.parse() {
+                self.slashing.invalid_block_penalty_bps = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_SLASH_METRIC_FRAUD_BPS") {
+            if let Ok(parsed) = value.parse() {
+                self.slashing.metric_fraud_penalty_bps = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_SLASH_MISSED_BLOCK_BPS") {
+            if let Ok(parsed) = value.parse() {
+                self.slashing.missed_block_penalty_bps = parsed;
             }
         }
     }

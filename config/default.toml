@@ -55,3 +55,8 @@ max_download_mbps = 10000.0
 max_upload_mbps = 10000.0
 min_latency_ms = 0.1
 max_latency_ms = 10000.0
+
+[slashing]
+invalid_block_penalty_bps = 1000   # 10% of stake
+metric_fraud_penalty_bps = 500     # 5% of stake
+missed_block_penalty_bps = 100     # 1% of stake

@@ -125,6 +125,54 @@ pub enum StateEvent {
     },
 }
 
+/// Reason a validator was slashed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SlashReason {
+    /// Produced an invalid block (bad state transition, wrong merkle root, etc.)
+    InvalidBlockProposal,
+    /// Anti-gaming system flagged metrics as fraudulent (outlier / out-of-bounds / suspicious).
+    MetricFraud,
+    /// Validator was selected but failed to produce a block within the expected window.
+    MissedBlock,
+}
+
+/// A record of a slashing event for audit purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashRecord {
+    /// Address of the slashed validator.
+    pub validator: String,
+    /// Reason for slashing.
+    pub reason: SlashReason,
+    /// Amount of stake burned.
+    pub amount_burned: u64,
+    /// Unix timestamp when the slash occurred.
+    pub at_time: u64,
+}
+
+// ==================== Slashing Configuration ====================
+
+/// Slashing penalty configuration (amounts in basis points of staked balance, 10_000 = 100%).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SlashingConfig {
+    /// Penalty for producing an invalid block (basis points of stake).
+    pub invalid_block_penalty_bps: u64,
+    /// Penalty for anti-gaming metric fraud (basis points of stake).
+    pub metric_fraud_penalty_bps: u64,
+    /// Penalty for missing a block when selected (basis points of stake).
+    pub missed_block_penalty_bps: u64,
+}
+
+impl Default for SlashingConfig {
+    fn default() -> Self {
+        Self {
+            invalid_block_penalty_bps: 1_000, // 10% of stake
+            metric_fraud_penalty_bps: 500,    // 5% of stake
+            missed_block_penalty_bps: 100,    // 1% of stake
+        }
+    }
+}
+
 impl GovernanceProposal {
     pub fn total_votes(&self) -> u64 {
         self.yes_votes + self.no_votes
@@ -170,6 +218,12 @@ pub struct State {
     /// Runtime-mutable chain parameters
     #[serde(default)]
     pub chain_params: ChainParams,
+    /// Audit trail of all slashing events.
+    #[serde(default)]
+    pub slashing_records: Vec<SlashRecord>,
+    /// Slashing penalty configuration.
+    #[serde(default)]
+    pub slashing_config: SlashingConfig,
 }
 
 impl State {
@@ -181,6 +235,8 @@ impl State {
             proposals: HashMap::new(),
             next_proposal_id: 1,
             chain_params: ChainParams::default(),
+            slashing_records: Vec::new(),
+            slashing_config: SlashingConfig::default(),
         }
     }
 
@@ -196,6 +252,8 @@ impl State {
             proposals: HashMap::new(),
             next_proposal_id: 1,
             chain_params: ChainParams::default(),
+            slashing_records: Vec::new(),
+            slashing_config: SlashingConfig::default(),
         }
     }
 
@@ -207,6 +265,8 @@ impl State {
             proposals: HashMap::new(),
             next_proposal_id: 1,
             chain_params: ChainParams::default(),
+            slashing_records: Vec::new(),
+            slashing_config: SlashingConfig::default(),
         }
     }
 
@@ -545,6 +605,52 @@ impl State {
                 .or_insert(Account::new(0));
             validator.balance += total_reward;
         }
+    }
+
+    /// Slash a validator's stake for misbehaviour.
+    ///
+    /// The penalty is computed from the slashing config (basis points of the validator's stake).
+    /// The burned tokens are permanently destroyed (not redistributed).
+    /// Returns the amount actually burned, or 0 if the validator has no stake.
+    pub fn slash_stake(&mut self, validator_address: &str, reason: SlashReason, now: u64) -> u64 {
+        let staked = self.get_staked_balance(validator_address);
+        if staked == 0 {
+            return 0;
+        }
+
+        let penalty_bps = match &reason {
+            SlashReason::InvalidBlockProposal => self.slashing_config.invalid_block_penalty_bps,
+            SlashReason::MetricFraud => self.slashing_config.metric_fraud_penalty_bps,
+            SlashReason::MissedBlock => self.slashing_config.missed_block_penalty_bps,
+        };
+
+        let burn_amount = staked.saturating_mul(penalty_bps) / 10_000;
+        if burn_amount == 0 {
+            return 0;
+        }
+
+        // Reduce stake (tokens are burned, not returned to balance).
+        if let Some(stake) = self.stakes.get_mut(validator_address) {
+            stake.amount = stake.amount.saturating_sub(burn_amount);
+        }
+
+        // Record the slashing event.
+        self.slashing_records.push(SlashRecord {
+            validator: validator_address.to_string(),
+            reason,
+            amount_burned: burn_amount,
+            at_time: now,
+        });
+
+        burn_amount
+    }
+
+    /// Get the slashing history for a specific validator.
+    pub fn get_slash_records(&self, validator_address: &str) -> Vec<&SlashRecord> {
+        self.slashing_records
+            .iter()
+            .filter(|r| r.validator == validator_address)
+            .collect()
     }
 
     /// Execute all passed proposals that have expired.
