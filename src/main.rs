@@ -308,6 +308,7 @@ async fn main() -> Result<()> {
     let storage_producer = storage.clone();
     let aggregator_epoch = metrics_aggregator.clone();
     let ws_tx_producer = ws_event_tx.clone();
+    let mempool_ttl_secs = config.producer.mempool_ttl_secs;
 
     tokio::spawn(async move {
         loop {
@@ -316,6 +317,19 @@ async fn main() -> Result<()> {
                 state_guard.chain_params.block_interval_secs.max(1)
             };
             sleep(Duration::from_secs(block_interval_secs)).await;
+
+            // Expire stale mempool transactions before producing a block.
+            {
+                let mut mempool_guard = mempool_producer.lock().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let expired = mempool_guard.expire_old(now, mempool_ttl_secs);
+                if expired > 0 {
+                    info!(expired, "expired stale mempool transactions");
+                }
+            }
 
             let mut producer_guard = producer_task.lock().await;
 
@@ -405,6 +419,30 @@ async fn main() -> Result<()> {
                         if let Err(e) = bc.validate_next_block(&block) {
                             warn!(error = %e, "rejected block");
                             continue;
+                        }
+
+                        // Verify that the block's validator matches the expected PoI-selected validator.
+                        {
+                            let producer_guard = producer.lock().await;
+                            let state_guard = state.lock().await;
+                            let stakes = state_guard.get_stake_map();
+                            if let Some(expected_validator) = producer_guard.select_validator(
+                                &bc.last_block().hash,
+                                block.index,
+                                &stakes,
+                            ) {
+                                if block.validator != expected_validator {
+                                    warn!(
+                                        block_validator = %block.validator,
+                                        expected_validator = %expected_validator,
+                                        block_index = block.index,
+                                        "rejected block: validator mismatch"
+                                    );
+                                    continue;
+                                }
+                            }
+                            // If select_validator returns None (no validators registered),
+                            // skip this check — single-node bootstrapping scenario.
                         }
 
                         let block_time_secs: u64 = match block.timestamp.timestamp().try_into() {

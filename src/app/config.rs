@@ -118,6 +118,11 @@ impl AppConfig {
                 self.producer.stake_weight = parsed.clamp(0.0, 1.0);
             }
         }
+        if let Ok(value) = std::env::var("NETCHAIN_MEMPOOL_TTL_SECS") {
+            if let Ok(parsed) = value.parse() {
+                self.producer.mempool_ttl_secs = parsed;
+            }
+        }
     }
 }
 
@@ -206,6 +211,8 @@ pub struct ProducerRuntimeConfig {
     pub metric_measurement_interval_secs: u64,
     /// How much stake weight influences validator selection (0.0 = pure PoI, 1.0 = pure PoS)
     pub stake_weight: f64,
+    /// Time-to-live for mempool transactions in seconds (default 900 = 15 min)
+    pub mempool_ttl_secs: u64,
 }
 
 impl Default for ProducerRuntimeConfig {
@@ -216,6 +223,7 @@ impl Default for ProducerRuntimeConfig {
             block_reward: 50,
             metric_measurement_interval_secs: 120,
             stake_weight: 0.3,
+            mempool_ttl_secs: 900,
         }
     }
 }

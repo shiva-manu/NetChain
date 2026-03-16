@@ -23,6 +23,7 @@ block_interval_secs = 15
 block_reward = 50
 metric_measurement_interval_secs = 120
 stake_weight = 0.3
+mempool_ttl_secs = 900
 
 [measurement]
 download_endpoints = ["https://speed.cloudflare.com/__down?bytes=10000000"]

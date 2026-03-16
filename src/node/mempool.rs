@@ -1,6 +1,7 @@
 use crate::state::{State, StateError};
 use crate::transaction::SignedTransaction;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Errors returned by the mempool
 #[derive(Debug)]
@@ -21,6 +22,9 @@ pub struct Mempool {
 
     /// sender -> ordered queue of tx hashes (nonce order)
     by_sender: HashMap<String, VecDeque<String>>,
+
+    /// tx_hash -> unix timestamp when the tx was inserted into the mempool
+    inserted_at: HashMap<String, u64>,
 }
 
 impl Mempool {
@@ -30,6 +34,7 @@ impl Mempool {
             txs: HashMap::new(),
             seen: HashSet::new(),
             by_sender: HashMap::new(),
+            inserted_at: HashMap::new(),
         }
     }
 
@@ -70,7 +75,9 @@ impl Mempool {
         }
 
         // Insert
+        let now = current_unix_timestamp();
         self.seen.insert(tx_hash.clone());
+        self.inserted_at.insert(tx_hash.clone(), now);
         self.txs.insert(tx_hash.clone(), tx);
         self.by_sender
             .entry(sender)
@@ -84,6 +91,7 @@ impl Mempool {
     pub fn remove_transaction(&mut self, tx_hash: &str) {
         if let Some(tx) = self.txs.remove(tx_hash) {
             self.seen.remove(tx_hash);
+            self.inserted_at.remove(tx_hash);
             if let Some(queue) = self.by_sender.get_mut(&tx.tx.sender) {
                 queue.retain(|h| h != tx_hash);
                 if queue.is_empty() {
@@ -98,6 +106,24 @@ impl Mempool {
         for tx in txs {
             self.remove_transaction(&tx.tx_hash_hex());
         }
+    }
+
+    /// Remove transactions that have been in the mempool longer than `ttl_secs`.
+    ///
+    /// Returns the number of expired transactions removed.
+    pub fn expire_old(&mut self, now: u64, ttl_secs: u64) -> usize {
+        let expired_hashes: Vec<String> = self
+            .inserted_at
+            .iter()
+            .filter(|(_hash, &inserted)| now.saturating_sub(inserted) >= ttl_secs)
+            .map(|(hash, _)| hash.clone())
+            .collect();
+
+        let count = expired_hashes.len();
+        for hash in expired_hashes {
+            self.remove_transaction(&hash);
+        }
+        count
     }
 
     /// Select transactions for block production
@@ -221,6 +247,13 @@ impl Mempool {
     }
 }
 
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +296,77 @@ mod tests {
             mempool.add_transaction(signed, &state),
             Err(MemPoolError::DuplicateTransaction)
         ));
+    }
+
+    #[test]
+    fn test_expire_old_removes_stale_txs() {
+        let kp1 = generate_ed25519_keypair();
+        let addr1 = pubkey_to_address_hex(&kp1.verifying_key());
+        let kp2 = generate_ed25519_keypair();
+        let addr2 = pubkey_to_address_hex(&kp2.verifying_key());
+
+        let state = State::with_genesis(vec![(addr1.clone(), 10_000), (addr2.clone(), 10_000)]);
+        let mut mempool = Mempool::new();
+
+        let tx0 = Transaction::new(addr1.clone(), "bob".into(), 50, 1, 0, None);
+        let signed0 = SignedTransaction::sign_with_keypair(&tx0, &kp1);
+        assert!(mempool.add_transaction(signed0.clone(), &state).is_ok());
+
+        let tx1 = Transaction::new(addr2.clone(), "bob".into(), 60, 1, 0, None);
+        let signed1 = SignedTransaction::sign_with_keypair(&tx1, &kp2);
+        assert!(mempool.add_transaction(signed1.clone(), &state).is_ok());
+        assert_eq!(mempool.len(), 2);
+
+        // With a TTL of 900s and "now" only 100s in the future, nothing should expire.
+        let now = current_unix_timestamp();
+        let expired = mempool.expire_old(now + 100, 900);
+        assert_eq!(expired, 0);
+        assert_eq!(mempool.len(), 2);
+
+        // Fast-forward past TTL: everything should expire.
+        let expired = mempool.expire_old(now + 901, 900);
+        assert_eq!(expired, 2);
+        assert_eq!(mempool.len(), 0);
+
+        // The seen set should also be cleared so the same tx can be re-added.
+        assert!(!mempool.seen.contains(&signed0.tx_hash_hex()));
+        assert!(!mempool.seen.contains(&signed1.tx_hash_hex()));
+    }
+
+    #[test]
+    fn test_expire_old_partial_expiry() {
+        let kp1 = generate_ed25519_keypair();
+        let addr1 = pubkey_to_address_hex(&kp1.verifying_key());
+        let kp2 = generate_ed25519_keypair();
+        let addr2 = pubkey_to_address_hex(&kp2.verifying_key());
+
+        let state = State::with_genesis(vec![(addr1.clone(), 10_000), (addr2.clone(), 10_000)]);
+        let mut mempool = Mempool::new();
+
+        // Insert first tx
+        let tx0 = Transaction::new(addr1.clone(), "bob".into(), 50, 1, 0, None);
+        let signed0 = SignedTransaction::sign_with_keypair(&tx0, &kp1);
+        assert!(mempool.add_transaction(signed0.clone(), &state).is_ok());
+
+        // Manually backdate the first tx's insertion time by 1000s
+        let hash0 = signed0.tx_hash_hex();
+        let original_time = *mempool.inserted_at.get(&hash0).unwrap();
+        mempool
+            .inserted_at
+            .insert(hash0.clone(), original_time.saturating_sub(1000));
+
+        // Insert second tx from a different sender (at current time)
+        let tx1 = Transaction::new(addr2.clone(), "bob".into(), 60, 1, 0, None);
+        let signed1 = SignedTransaction::sign_with_keypair(&tx1, &kp2);
+        assert!(mempool.add_transaction(signed1.clone(), &state).is_ok());
+        assert_eq!(mempool.len(), 2);
+
+        // Expire with TTL of 900s at current time. Only the backdated tx should expire.
+        let now = current_unix_timestamp();
+        let expired = mempool.expire_old(now, 900);
+        assert_eq!(expired, 1);
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.txs.contains_key(&signed1.tx_hash_hex()));
+        assert!(!mempool.txs.contains_key(&hash0));
     }
 }
