@@ -1143,6 +1143,42 @@ async fn main() -> Result<()> {
                     }
                     other => {
                         warn!(validation = ?other, node_id, "rejected announced metrics");
+
+                        // Slash for metric fraud on Outlier, OutOfBounds, or Suspicious results.
+                        // RateLimited is not a fraud signal — skip slashing for it.
+                        let should_slash = matches!(
+                            other,
+                            anti_gaming::ValidationResult::Outlier(_)
+                                | anti_gaming::ValidationResult::OutOfBounds(_)
+                                | anti_gaming::ValidationResult::Suspicious(_)
+                        );
+                        if should_slash {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let slash_reason = SlashReason::MetricFraud;
+                            let mut state_guard = state.lock().await;
+                            let burned =
+                                state_guard.slash_stake(&node_id, slash_reason.clone(), now);
+                            if burned > 0 {
+                                warn!(
+                                    node_id,
+                                    burned,
+                                    "slashed validator for metric fraud"
+                                );
+                                let remaining = state_guard.get_staked_balance(&node_id);
+                                let _ = ws_tx_main.send(WsEvent::ValidatorSlashed {
+                                    validator: node_id.clone(),
+                                    reason: slash_reason_label(&slash_reason).to_string(),
+                                    amount_burned: burned,
+                                    remaining_stake: remaining,
+                                });
+                                if let Err(e) = storage_main.save_state(&state_guard) {
+                                    warn!(error = %e, "failed to persist state after metric fraud slash");
+                                }
+                            }
+                        }
                     }
                 }
             }
