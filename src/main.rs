@@ -1096,7 +1096,7 @@ fn rebuild_state_from_chain(chain: &[Block]) -> Result<State> {
         }
 
         for tx in &block.transactions {
-            state
+            let _ = state
                 .apply_transaction_at(tx, block_time_secs)
                 .map_err(|e| {
                     anyhow::anyhow!(

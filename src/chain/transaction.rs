@@ -13,7 +13,6 @@
 //! - Verify with `SignedTransaction::verify();
 
 use base64::{engine::general_purpose, Engine as _};
-use bincode::Options;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -203,13 +202,11 @@ impl Transaction {
     /// Produce deterministic bytes for signing / hashing
     /// Uses bincode serialization ( Compact + deterministic)
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        // We rely on bincode default options which are deterministic for primitive types
-        // Avoid Option<> variants chainging ordering by serializing the struct as-is.
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding() // Ensure u64 always takes 8 bytes
-            .with_little_endian() // Explicit byte order
-            .serialize(self)
-            .expect("bincode serialization should succed for Transaction")
+        let config = bincode::config::standard()
+            .with_fixed_int_encoding() // Ensure u64 always takes 8 bytes
+            .with_little_endian(); // Explicit byte order
+        bincode::serde::encode_to_vec(self, config)
+            .expect("bincode serialization should succeed for Transaction")
     }
 
     /// Compute SHA-256 hash of canonical bytes -> hex string
