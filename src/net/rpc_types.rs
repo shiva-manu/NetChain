@@ -31,6 +31,8 @@ pub enum RpcRequest {
     GetProposals,
     #[serde(rename = "get_proposal")]
     GetProposal { proposal_id: u64 },
+    #[serde(rename = "get_chain_params")]
+    GetChainParams,
 }
 
 /// RPC Response types

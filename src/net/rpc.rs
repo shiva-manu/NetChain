@@ -214,6 +214,20 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
                 None => RpcResponse::error(format!("Proposal {} not found", proposal_id)),
             }
         }
+
+        RpcRequest::GetChainParams => {
+            let state = rpc_state.state.lock().await;
+            let params = &state.chain_params;
+            RpcResponse::success(serde_json::json!({
+                "block_reward": params.block_reward,
+                "block_interval_secs": params.block_interval_secs,
+                "max_txs_per_block": params.max_txs_per_block,
+                "stake_weight": params.stake_weight,
+                "proposal_quorum_bps": params.proposal_quorum_bps,
+                "proposal_approval_bps": params.proposal_approval_bps,
+                "min_proposal_stake": params.min_proposal_stake,
+            }))
+        }
     }
 }
 

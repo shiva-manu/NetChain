@@ -105,6 +105,26 @@ pub struct ExecutedProposal {
     pub action: ProposalAction,
 }
 
+/// Events emitted during state transitions that callers can broadcast via WebSocket.
+#[derive(Debug, Clone)]
+pub enum StateEvent {
+    /// A new governance proposal was created.
+    ProposalCreated {
+        proposal_id: u64,
+        title: String,
+        proposer: String,
+    },
+    /// A vote was cast on a governance proposal.
+    VoteCast {
+        proposal_id: u64,
+        title: String,
+        voter: String,
+        support: bool,
+        yes_votes: u64,
+        no_votes: u64,
+    },
+}
+
 impl GovernanceProposal {
     pub fn total_votes(&self) -> u64 {
         self.yes_votes + self.no_votes
