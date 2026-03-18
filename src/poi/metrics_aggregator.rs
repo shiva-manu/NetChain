@@ -5,7 +5,7 @@
 
 use crate::consensus::NodeMetrics;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Configuration for the metrics aggregator
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,6 +73,9 @@ pub struct AggregatedNodeMetrics {
     /// Number of valid attestations
     pub attestation_count: usize,
 
+    /// Number of distinct peers who have attested to this node.
+    pub unique_attester_count: usize,
+
     /// When metrics were last updated
     pub last_updated: u64,
 }
@@ -88,12 +91,19 @@ impl AggregatedNodeMetrics {
             verified_latency_ms: 0.0,
             reputation: 0.5, // Start neutral
             attestation_count: 0,
+            unique_attester_count: 0,
             last_updated: 0,
         }
     }
 
     /// Convert to NodeMetrics for use in consensus
     pub fn to_node_metrics(&self, config: &AggregatorConfig) -> NodeMetrics {
+        let identity_score = if config.min_attestations == 0 {
+            1.0
+        } else {
+            (self.unique_attester_count as f64 / config.min_attestations as f64).clamp(0.0, 1.0)
+        };
+
         // Blend self-reported and verified metrics based on attestation count
         let (download, upload, latency, uptime, stability) =
             if self.attestation_count >= config.min_attestations {
@@ -134,6 +144,11 @@ impl AggregatedNodeMetrics {
             latency_ms: latency,
             uptime_percent: uptime,
             stability_percent: stability,
+            identity_score,
+            reputation_score: self.reputation.clamp(0.0, 1.0),
+            attestation_count: self.attestation_count,
+            unique_attester_count: self.unique_attester_count,
+            slashing_penalty: 0.0,
         }
     }
 }
@@ -250,9 +265,10 @@ impl MetricsAggregator {
             .or_insert_with(|| AggregatedNodeMetrics::new(subject_id.clone()));
 
         // Check for duplicate attestation from same attester
-        if node.attestations.iter().any(
-            |a| a.attester_id == attestation.attester_id && (now - a.timestamp) < 60, // Within 1 minute
-        ) {
+        if node.attestations.iter().any(|a| {
+            a.attester_id == attestation.attester_id && now.saturating_sub(a.timestamp) < 60
+            // Within 1 minute
+        }) {
             return Err("Duplicate attestation");
         }
 
@@ -286,6 +302,7 @@ impl MetricsAggregator {
                 node.verified_upload_mbps = 0.0;
                 node.verified_latency_ms = 0.0;
                 node.attestation_count = 0;
+                node.unique_attester_count = 0;
                 return;
             }
 
@@ -294,12 +311,14 @@ impl MetricsAggregator {
             let mut weighted_download = 0.0;
             let mut weighted_upload = 0.0;
             let mut weighted_latency = 0.0;
+            let mut unique_attesters: HashSet<&str> = HashSet::new();
 
             for att in &valid_attestations {
                 // Weight by confidence and recency
                 let age_secs = now.saturating_sub(att.timestamp) as f64;
                 let recency_weight = self.config.attestation_decay.powf(age_secs / 3600.0);
                 let weight = att.confidence * recency_weight;
+                unique_attesters.insert(att.attester_id.as_str());
 
                 weighted_download += att.download_mbps * weight;
                 weighted_upload += att.upload_mbps * weight;
@@ -314,6 +333,7 @@ impl MetricsAggregator {
             }
 
             node.attestation_count = valid_attestations.len();
+            node.unique_attester_count = unique_attesters.len();
         }
     }
 
@@ -423,6 +443,13 @@ impl MetricsAggregator {
         self.nodes.get(node_id)
     }
 
+    /// Convert a tracked node into consensus-ready metrics.
+    pub fn get_consensus_node_metrics(&self, node_id: &str) -> Option<NodeMetrics> {
+        self.nodes
+            .get(node_id)
+            .map(|node| node.to_node_metrics(&self.config))
+    }
+
     /// Get current epoch number
     pub fn current_epoch(&self) -> u64 {
         self.current_epoch
@@ -433,11 +460,48 @@ impl MetricsAggregator {
         self.nodes.len()
     }
 
+    /// Count nodes that have reached the attestation quorum.
+    pub fn verified_node_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|node| node.unique_attester_count >= self.config.min_attestations)
+            .count()
+    }
+
+    /// Average reputation across tracked nodes.
+    pub fn average_reputation(&self) -> f64 {
+        if self.nodes.is_empty() {
+            return 0.0;
+        }
+
+        self.nodes.values().map(|node| node.reputation).sum::<f64>() / self.nodes.len() as f64
+    }
+
+    /// Average identity confidence across tracked nodes.
+    pub fn average_identity_score(&self) -> f64 {
+        if self.nodes.is_empty() {
+            return 0.0;
+        }
+
+        self.nodes
+            .values()
+            .map(|node| {
+                if self.config.min_attestations == 0 {
+                    1.0
+                } else {
+                    (node.unique_attester_count as f64 / self.config.min_attestations as f64)
+                        .clamp(0.0, 1.0)
+                }
+            })
+            .sum::<f64>()
+            / self.nodes.len() as f64
+    }
+
     /// Get nodes that need metric verification (low attestation count)
     pub fn get_unverified_nodes(&self) -> Vec<String> {
         self.nodes
             .iter()
-            .filter(|(_, node)| node.attestation_count < self.config.min_attestations)
+            .filter(|(_, node)| node.unique_attester_count < self.config.min_attestations)
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -550,6 +614,107 @@ mod tests {
 
         let result = agg.add_attestation(att);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_future_attestation_does_not_panic() {
+        let config = AggregatorConfig::default();
+        let mut agg = MetricsAggregator::new(config);
+
+        agg.register_node("subject".to_string());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let att1 = Attestation {
+            attester_id: "peer1".to_string(),
+            subject_id: "subject".to_string(),
+            download_mbps: 100.0,
+            upload_mbps: 50.0,
+            latency_ms: 20.0,
+            confidence: 0.9,
+            timestamp: now + 30,
+            signature: "sig1".to_string(),
+        };
+
+        let att2 = Attestation {
+            attester_id: "peer1".to_string(),
+            subject_id: "subject".to_string(),
+            download_mbps: 100.0,
+            upload_mbps: 50.0,
+            latency_ms: 20.0,
+            confidence: 0.9,
+            timestamp: now + 31,
+            signature: "sig2".to_string(),
+        };
+
+        assert!(agg.add_attestation(att1).is_ok());
+        assert!(matches!(
+            agg.add_attestation(att2),
+            Err("Duplicate attestation")
+        ));
+    }
+
+    #[test]
+    fn test_verified_nodes_require_unique_attesters() {
+        let mut config = AggregatorConfig::default();
+        config.min_attestations = 3;
+        let mut agg = MetricsAggregator::new(config.clone());
+
+        agg.register_node("subject".to_string());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let att1 = Attestation {
+            attester_id: "peer1".to_string(),
+            subject_id: "subject".to_string(),
+            download_mbps: 100.0,
+            upload_mbps: 50.0,
+            latency_ms: 20.0,
+            confidence: 0.9,
+            timestamp: now - 61,
+            signature: "sig1".to_string(),
+        };
+
+        let att2 = Attestation {
+            attester_id: "peer2".to_string(),
+            subject_id: "subject".to_string(),
+            download_mbps: 95.0,
+            upload_mbps: 48.0,
+            latency_ms: 22.0,
+            confidence: 0.8,
+            timestamp: now - 61,
+            signature: "sig2".to_string(),
+        };
+
+        let att3 = Attestation {
+            attester_id: "peer1".to_string(),
+            subject_id: "subject".to_string(),
+            download_mbps: 102.0,
+            upload_mbps: 52.0,
+            latency_ms: 19.0,
+            confidence: 0.85,
+            timestamp: now,
+            signature: "sig3".to_string(),
+        };
+
+        assert!(agg.add_attestation(att1).is_ok());
+        assert!(agg.add_attestation(att2).is_ok());
+        assert!(agg.add_attestation(att3).is_ok());
+
+        let node = agg.get_node("subject").unwrap();
+        assert_eq!(node.attestation_count, 3);
+        assert_eq!(node.unique_attester_count, 2);
+        assert_eq!(agg.verified_node_count(), 0);
+        assert!(agg.get_unverified_nodes().contains(&"subject".to_string()));
+
+        let metrics = node.to_node_metrics(&config);
+        assert!((metrics.identity_score - (2.0 / 3.0)).abs() < 0.001);
     }
 
     #[test]

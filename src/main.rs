@@ -12,7 +12,6 @@ use netchain::anti_gaming::{self, AntiGamingService};
 use netchain::block::Block;
 use netchain::blockchain::Blockchain;
 use netchain::config::AppConfig;
-use netchain::consensus;
 use netchain::measurement::MeasurementService;
 use netchain::mempool::Mempool;
 use netchain::metrics_aggregator::{Attestation, MetricsAggregator};
@@ -20,9 +19,9 @@ use netchain::monitoring::{start_monitoring_server, MonitoringState};
 use netchain::p2p::{NetworkMessage, P2PEvent, P2PService};
 use netchain::producer::{BlockProducer, ProducerConfig};
 use netchain::rpc::{start_rpc_server, RpcState};
+use netchain::state::SlashReason;
 use netchain::state::State;
 use netchain::state::StateEvent;
-use netchain::state::SlashReason;
 use netchain::storage::Storage;
 use netchain::transaction::SignedTransaction;
 use netchain::websocket::{self, start_ws_server, WsEvent};
@@ -36,7 +35,91 @@ fn slash_reason_label(reason: &SlashReason) -> &'static str {
     }
 }
 
+fn slash_severity(reason: &SlashReason) -> f64 {
+    match reason {
+        SlashReason::InvalidBlockProposal => 0.35,
+        SlashReason::MetricFraud => 0.25,
+        SlashReason::MissedBlock => 0.10,
+    }
+}
+
+async fn sync_validator_metrics_from_aggregator(
+    producer: &Arc<Mutex<BlockProducer>>,
+    aggregator: &Arc<Mutex<MetricsAggregator>>,
+    state: &Arc<Mutex<State>>,
+    node_id: &str,
+) {
+    let (consensus_metrics, slashing_penalty) = {
+        let agg = aggregator.lock().await;
+        let consensus_metrics = agg.get_consensus_node_metrics(node_id);
+        drop(agg);
+
+        let state_guard = state.lock().await;
+        let slashing_penalty = state_guard.slashing_penalty_for(node_id);
+
+        (consensus_metrics, slashing_penalty)
+    };
+
+    let mut metrics = consensus_metrics
+        .unwrap_or_else(|| BlockProducer::default_node_metrics(node_id.to_string()));
+    metrics.slashing_penalty = slashing_penalty;
+
+    let mut producer_guard = producer.lock().await;
+    if producer_guard.get_node_metrics(node_id).is_some() {
+        producer_guard.update_peer_metrics(node_id, metrics);
+    } else {
+        producer_guard.register_peer(node_id.to_string(), metrics);
+    }
+}
+
+async fn slash_validator(
+    state: &Arc<Mutex<State>>,
+    producer: &Arc<Mutex<BlockProducer>>,
+    storage: &Arc<Storage>,
+    ws_tx: &tokio::sync::broadcast::Sender<WsEvent>,
+    node_id: &str,
+    reason: SlashReason,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let (burned, remaining) = {
+        let mut state_guard = state.lock().await;
+        let burned = state_guard.slash_stake(node_id, reason.clone(), now);
+        let remaining = state_guard.get_staked_balance(node_id);
+
+        if burned > 0 {
+            if let Err(e) = storage.save_state(&state_guard) {
+                warn!(error = %e, "failed to persist state after slashing");
+            }
+        }
+
+        (burned, remaining)
+    };
+
+    if burned > 0 {
+        let mut producer_guard = producer.lock().await;
+        producer_guard.penalize_validator(node_id, slash_severity(&reason));
+
+        warn!(
+            node_id,
+            burned,
+            reason = slash_reason_label(&reason),
+            "validator slashed"
+        );
+        let _ = ws_tx.send(WsEvent::ValidatorSlashed {
+            validator: node_id.to_string(),
+            reason: slash_reason_label(&reason).to_string(),
+            amount_burned: burned,
+            remaining_stake: remaining,
+        });
+    }
+}
+
 /// Convert a `StateEvent` into a `WsEvent` for WebSocket broadcasting.
+#[allow(dead_code)]
 fn state_event_to_ws(event: &StateEvent) -> WsEvent {
     match event {
         StateEvent::ProposalCreated {
@@ -65,6 +148,27 @@ fn state_event_to_ws(event: &StateEvent) -> WsEvent {
             no_votes: *no_votes,
         },
     }
+}
+
+/// Parse chain sync blocks strictly.
+///
+/// If any block fails to deserialize, reject the entire response instead of
+/// silently dropping the malformed entry and syncing a partial chain.
+fn parse_chain_sync_blocks(blocks: &[String]) -> Result<Vec<Block>> {
+    let mut parsed_blocks = Vec::with_capacity(blocks.len());
+
+    for (index, block_json) in blocks.iter().enumerate() {
+        let block = serde_json::from_str(block_json).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid block at position {} in sync response: {}",
+                index,
+                e
+            )
+        })?;
+        parsed_blocks.push(block);
+    }
+
+    Ok(parsed_blocks)
 }
 
 #[tokio::main]
@@ -135,17 +239,16 @@ async fn main() -> Result<()> {
     // Initialize mempool
     let mempool = Arc::new(Mutex::new(Mempool::new()));
     info!("mempool initialized");
-
     // Start P2P networking
     let port = config.node.p2p_port;
 
-    let p2p = Arc::new(Mutex::new(P2PService::new(port).await?));
+    let (mut p2p_service, p2p_handle, p2p_command_rx) = P2PService::new(port).await?;
+
+    // Get shared state for monitoring (lock-free peer count access)
+    let p2p_shared_state = p2p_handle.shared_state();
 
     // Get local peer ID for producer config
-    let local_peer_id = {
-        let p2p_guard = p2p.lock().await;
-        p2p_guard.local_peer_id()
-    };
+    let local_peer_id = p2p_handle.local_peer_id().to_string();
     info!(peer_id = %local_peer_id, "local peer id initialized");
 
     // Initialize block producer with PoI consensus
@@ -159,6 +262,11 @@ async fn main() -> Result<()> {
         producer_config,
         config.producer.stake_weight,
     )));
+
+    {
+        let mut producer_guard = producer.lock().await;
+        producer_guard.set_min_attestations(config.aggregator.min_attestations);
+    }
 
     // Register self as validator with default metrics
     {
@@ -184,6 +292,8 @@ async fn main() -> Result<()> {
         let mut agg = metrics_aggregator.lock().await;
         agg.register_node(local_peer_id.clone());
     }
+    sync_validator_metrics_from_aggregator(&producer, &metrics_aggregator, &state, &local_peer_id)
+        .await;
     info!("metrics aggregator initialized");
 
     // Anti-gaming service for validation and rate limiting
@@ -194,11 +304,9 @@ async fn main() -> Result<()> {
     // Channel: P2P → main
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-    // Start P2P networking task
-    let p2p_runner = p2p.clone();
+    // Start P2P networking task - it now owns the service
     tokio::spawn(async move {
-        let mut p2p = p2p_runner.lock().await;
-        p2p.run(tx).await;
+        p2p_service.run(tx, p2p_command_rx).await;
     });
 
     info!(p2p_port = port, "node ready and waiting for p2p events");
@@ -208,7 +316,7 @@ async fn main() -> Result<()> {
         blockchain: blockchain.clone(),
         state: state.clone(),
         mempool: mempool.clone(),
-        p2p: p2p.clone(),
+        p2p: p2p_handle.clone(),
     });
 
     let rpc_bind_addr = config.rpc.bind_addr.clone();
@@ -223,9 +331,11 @@ async fn main() -> Result<()> {
         let monitoring_state = Arc::new(MonitoringState {
             blockchain: blockchain.clone(),
             mempool: mempool.clone(),
-            p2p: p2p.clone(),
+            p2p_shared: p2p_shared_state.clone(),
             producer: producer.clone(),
             aggregator: metrics_aggregator.clone(),
+            measurement: measurement_service.clone(),
+            state: state.clone(),
             started_at: Instant::now(),
         });
         let monitoring_bind_addr = config.monitoring.bind_addr.clone();
@@ -260,7 +370,9 @@ async fn main() -> Result<()> {
     // Measures own internet performance periodically and announces to network
     let measurement_task = measurement_service.clone();
     let aggregator_task = metrics_aggregator.clone();
-    let p2p_metrics = p2p.clone();
+    let producer_task_metrics = producer.clone();
+    let state_task_metrics = state.clone();
+    let p2p_metrics = p2p_handle.clone();
     let local_id_metrics = local_peer_id.clone();
     let measurement_interval_secs = config.producer.metric_measurement_interval_secs;
 
@@ -286,18 +398,30 @@ async fn main() -> Result<()> {
                 );
             }
 
+            sync_validator_metrics_from_aggregator(
+                &producer_task_metrics,
+                &aggregator_task,
+                &state_task_metrics,
+                &local_id_metrics,
+            )
+            .await;
+
+            let attestation_count = {
+                let agg = aggregator_task.lock().await;
+                agg.get_consensus_node_metrics(&local_id_metrics)
+                    .map(|metrics| metrics.attestation_count)
+                    .unwrap_or(0)
+            };
+
             // Announce metrics to network
-            {
-                let mut p2p_guard = p2p_metrics.lock().await;
-                p2p_guard.announce_metrics(
-                    metrics.download_mbps,
-                    metrics.upload_mbps,
-                    metrics.latency_ms,
-                    metrics.uptime_percent,
-                    metrics.stability_percent,
-                    0, // attestation_count starts at 0
-                );
-            }
+            p2p_metrics.announce_metrics(
+                metrics.download_mbps,
+                metrics.upload_mbps,
+                metrics.latency_ms,
+                metrics.uptime_percent,
+                metrics.stability_percent,
+                attestation_count,
+            );
 
             if metrics.sample_count > 0 {
                 info!(
@@ -311,7 +435,7 @@ async fn main() -> Result<()> {
     });
 
     // Block production task (runs every block_interval_secs)
-    let p2p_producer = p2p.clone();
+    let p2p_producer = p2p_handle.clone();
     let blockchain_producer = blockchain.clone();
     let mempool_producer = mempool.clone();
     let state_producer = state.clone();
@@ -382,8 +506,7 @@ async fn main() -> Result<()> {
 
                 // Broadcast block
                 let json = serde_json::to_string(&new_block).unwrap();
-                let mut p2p_guard = p2p_producer.lock().await;
-                p2p_guard.publish_block(json);
+                p2p_producer.publish_block(json);
                 info!(block_height, "broadcasted block");
 
                 // Broadcast new block to WebSocket subscribers
@@ -415,6 +538,7 @@ async fn main() -> Result<()> {
     // Main event loop
     let storage_main = storage.clone();
     let ws_tx_main = ws_event_tx.clone();
+    let p2p = p2p_handle.clone();
     while let Some(event) = rx.recv().await {
         match event {
             P2PEvent::Message(NetworkMessage::Block(block_json)) => {
@@ -500,30 +624,16 @@ async fn main() -> Result<()> {
 
                                 // Slash the validator for proposing an invalid block.
                                 let slash_reason = SlashReason::InvalidBlockProposal;
-                                let burned = state_guard.slash_stake(
+                                drop(state_guard);
+                                slash_validator(
+                                    &state,
+                                    &producer,
+                                    &storage_main,
+                                    &ws_tx_main,
                                     &block.validator,
-                                    slash_reason.clone(),
-                                    block_time_secs,
-                                );
-                                if burned > 0 {
-                                    warn!(
-                                        validator = %block.validator,
-                                        burned,
-                                        "slashed validator for invalid block proposal"
-                                    );
-                                    let remaining = state_guard.get_staked_balance(&block.validator);
-                                    let _ = ws_tx_main.send(WsEvent::ValidatorSlashed {
-                                        validator: block.validator.clone(),
-                                        reason: slash_reason_label(&slash_reason).to_string(),
-                                        amount_burned: burned,
-                                        remaining_stake: remaining,
-                                    });
-                                    // Persist state after slashing.
-                                    if let Err(e) = storage_main.save_state(&state_guard) {
-                                        warn!(error = %e, "failed to persist state after slashing");
-                                    }
-                                }
-
+                                    slash_reason,
+                                )
+                                .await;
                                 continue;
                             }
 
@@ -640,8 +750,7 @@ async fn main() -> Result<()> {
                     .collect();
 
                 if !blocks.is_empty() {
-                    let mut p2p_guard = p2p.lock().await;
-                    p2p_guard.send_chain_sync_response(blocks.clone());
+                    p2p.send_chain_sync_response(blocks.clone());
                     info!(blocks = blocks.len(), "sent chain sync response");
                 }
             }
@@ -649,10 +758,13 @@ async fn main() -> Result<()> {
             P2PEvent::Message(NetworkMessage::ChainSyncResponse { blocks }) => {
                 info!(blocks = blocks.len(), "received chain sync response");
 
-                let parsed_blocks: Vec<Block> = blocks
-                    .iter()
-                    .filter_map(|s| serde_json::from_str(s).ok())
-                    .collect();
+                let parsed_blocks = match parse_chain_sync_blocks(&blocks) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        warn!(error = %e, "rejected chain sync response");
+                        continue;
+                    }
+                };
 
                 if !parsed_blocks.is_empty() {
                     let mut bc = blockchain.lock().await;
@@ -783,19 +895,26 @@ async fn main() -> Result<()> {
                     agg.register_node(peer.to_string());
                 }
 
+                sync_validator_metrics_from_aggregator(
+                    &producer,
+                    &metrics_aggregator,
+                    &state,
+                    &peer.to_string(),
+                )
+                .await;
+
                 // Request chain sync from new peer
                 {
                     let height = {
                         let bc = blockchain.lock().await;
                         bc.height()
                     };
-                    let mut p2p_guard = p2p.lock().await;
-                    p2p_guard.request_chain_sync(height + 1);
+                    p2p.request_chain_sync(height + 1);
                     info!(from_height = height + 1, "requested chain sync from peer");
 
                     // Issue a metric challenge to the new peer
                     let nonce = format!("{:x}", rand::random::<u64>());
-                    p2p_guard.send_metric_challenge(
+                    p2p.send_metric_challenge(
                         peer.to_string(),
                         nonce,
                         1_000_000, // 1 MB challenge
@@ -829,10 +948,7 @@ async fn main() -> Result<()> {
                 bytes_to_download,
                 timestamp: _,
             }) => {
-                let local_id = {
-                    let p2p_guard = p2p.lock().await;
-                    p2p_guard.local_peer_id()
-                };
+                let local_id = p2p.local_peer_id().to_string();
 
                 // Only respond if we're the target
                 if target_id == local_id {
@@ -879,8 +995,7 @@ async fn main() -> Result<()> {
                             1000
                         };
 
-                        let mut p2p_guard = p2p.lock().await;
-                        p2p_guard.send_metric_response(
+                        p2p.send_metric_response(
                             challenge_nonce,
                             download,
                             upload,
@@ -917,10 +1032,7 @@ async fn main() -> Result<()> {
                     "received metric challenge response"
                 );
 
-                let local_id = {
-                    let p2p_guard = p2p.lock().await;
-                    p2p_guard.local_peer_id()
-                };
+                let local_id = p2p.local_peer_id().to_string();
 
                 // Validate metrics with anti-gaming
                 let validation = {
@@ -980,18 +1092,23 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    sync_validator_metrics_from_aggregator(
+                        &producer,
+                        &metrics_aggregator,
+                        &state,
+                        &responder_id,
+                    )
+                    .await;
+
                     // Broadcast attestation to network
-                    {
-                        let mut p2p_guard = p2p.lock().await;
-                        p2p_guard.send_metric_attestation(
-                            responder_id,
-                            download_mbps,
-                            upload_mbps,
-                            latency_ms,
-                            confidence,
-                            "".to_string(), // Signature placeholder - would need proper signing
-                        );
-                    }
+                    p2p.send_metric_attestation(
+                        responder_id,
+                        download_mbps,
+                        upload_mbps,
+                        latency_ms,
+                        confidence,
+                        "".to_string(), // Signature placeholder - would need proper signing
+                    );
                 }
             }
 
@@ -1005,10 +1122,7 @@ async fn main() -> Result<()> {
                 timestamp,
                 signature: _,
             }) => {
-                let local_id = {
-                    let p2p_guard = p2p.lock().await;
-                    p2p_guard.local_peer_id()
-                };
+                let local_id = p2p.local_peer_id().to_string();
 
                 // Don't process our own attestations
                 if attester_id == local_id {
@@ -1052,6 +1166,14 @@ async fn main() -> Result<()> {
                         Err(e) => warn!(error = %e, subject_id, "failed to store attestation"),
                     }
                 }
+
+                sync_validator_metrics_from_aggregator(
+                    &producer,
+                    &metrics_aggregator,
+                    &state,
+                    &subject_id,
+                )
+                .await;
             }
 
             P2PEvent::Message(NetworkMessage::MetricAnnouncement {
@@ -1064,10 +1186,7 @@ async fn main() -> Result<()> {
                 timestamp: _,
                 attestation_count,
             }) => {
-                let local_id = {
-                    let p2p_guard = p2p.lock().await;
-                    p2p_guard.local_peer_id()
-                };
+                let local_id = p2p.local_peer_id().to_string();
 
                 // Don't process our own announcements
                 if node_id == local_id {
@@ -1112,30 +1231,20 @@ async fn main() -> Result<()> {
                             );
                         }
 
-                        // Update validator pool with verified metrics
-                        {
-                            let mut prod = producer.lock().await;
-                            if prod.get_node_metrics(&node_id).is_some() {
-                                // Update with new values
-                                let updated = consensus::NodeMetrics {
-                                    node_id: node_id.clone(),
-                                    download_mbps,
-                                    upload_mbps,
-                                    latency_ms,
-                                    uptime_percent,
-                                    stability_percent,
-                                };
-                                prod.update_peer_metrics(&node_id, updated);
-                            }
-                        }
+                        sync_validator_metrics_from_aggregator(
+                            &producer,
+                            &metrics_aggregator,
+                            &state,
+                            &node_id,
+                        )
+                        .await;
                         info!(node_id, "accepted and stored announced metrics");
                     }
                     anti_gaming::ValidationResult::InsufficientAttestations => {
                         info!(node_id, "insufficient attestations, issuing challenge");
                         // Issue a challenge to verify
                         let nonce = format!("{:x}", rand::random::<u64>());
-                        let mut p2p_guard = p2p.lock().await;
-                        p2p_guard.send_metric_challenge(
+                        p2p.send_metric_challenge(
                             node_id.clone(),
                             nonce,
                             1_000_000, // 1 MB
@@ -1153,31 +1262,15 @@ async fn main() -> Result<()> {
                                 | anti_gaming::ValidationResult::Suspicious(_)
                         );
                         if should_slash {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            let slash_reason = SlashReason::MetricFraud;
-                            let mut state_guard = state.lock().await;
-                            let burned =
-                                state_guard.slash_stake(&node_id, slash_reason.clone(), now);
-                            if burned > 0 {
-                                warn!(
-                                    node_id,
-                                    burned,
-                                    "slashed validator for metric fraud"
-                                );
-                                let remaining = state_guard.get_staked_balance(&node_id);
-                                let _ = ws_tx_main.send(WsEvent::ValidatorSlashed {
-                                    validator: node_id.clone(),
-                                    reason: slash_reason_label(&slash_reason).to_string(),
-                                    amount_burned: burned,
-                                    remaining_stake: remaining,
-                                });
-                                if let Err(e) = storage_main.save_state(&state_guard) {
-                                    warn!(error = %e, "failed to persist state after metric fraud slash");
-                                }
-                            }
+                            slash_validator(
+                                &state,
+                                &producer,
+                                &storage_main,
+                                &ws_tx_main,
+                                &node_id,
+                                SlashReason::MetricFraud,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1311,5 +1404,22 @@ mod tests {
         .unwrap();
         assert_eq!(rebuilt.chain_params.block_reward, 75);
         assert!(rebuilt.get_proposal(1).is_none());
+    }
+
+    #[test]
+    fn test_parse_chain_sync_blocks_is_strict() {
+        let base_time = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let block = Block::new_at(
+            1,
+            vec![],
+            "genesis".to_string(),
+            "validator".to_string(),
+            base_time,
+        );
+        let valid_json = serde_json::to_string(&block).unwrap();
+        let invalid_json = "{not valid json}".to_string();
+
+        let result = parse_chain_sync_blocks(&[valid_json, invalid_json]);
+        assert!(result.is_err());
     }
 }

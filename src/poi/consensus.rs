@@ -8,13 +8,46 @@ use std::collections::HashMap;
 pub struct PoiConfig {
     pub weights: Weights,
     pub thresholds: Thresholds,
-    /// How much stake influences validator selection vs PoI score (0.0 = pure PoI, 1.0 = pure stake)
+    /// How much stake influences validator selection vs hybrid trust score (0.0 = pure trust, 1.0 = pure stake)
     #[serde(default = "default_stake_weight")]
     pub stake_weight: f64,
+    /// Weights for the hybrid trust score.
+    #[serde(default)]
+    pub hybrid: HybridWeights,
 }
 
 fn default_stake_weight() -> f64 {
     0.3
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HybridWeights {
+    /// PoI contribution to the trust score.
+    pub poi: f64,
+    /// Long-term reputation contribution.
+    pub reputation: f64,
+    /// Identity confidence contribution.
+    pub identity: f64,
+    /// Multi-party attestation volume contribution.
+    pub attestation: f64,
+    /// Recent slashing penalty contribution.
+    pub slashing: f64,
+    /// Minimum attestation count used to normalize the attestation factor.
+    pub min_attestations: usize,
+}
+
+impl Default for HybridWeights {
+    fn default() -> Self {
+        Self {
+            poi: 0.35,
+            reputation: 0.25,
+            identity: 0.15,
+            attestation: 0.15,
+            slashing: 0.10,
+            min_attestations: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,6 +70,7 @@ pub struct Thresholds {
 
 /// Node's internet metrics (self-reported or proven via P2P challenges)
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct NodeMetrics {
     pub node_id: String, // e.g., pubkey hash
     pub upload_mbps: f64,
@@ -44,9 +78,33 @@ pub struct NodeMetrics {
     pub latency_ms: f64,        // Avg RTT to peers
     pub uptime_percent: f64,    // Over last epoch (e.g., 99.5)
     pub stability_percent: f64, // % successful packets
+    pub identity_score: f64,
+    pub reputation_score: f64,
+    pub attestation_count: usize,
+    pub unique_attester_count: usize,
+    pub slashing_penalty: f64,
 }
 
 impl NodeMetrics {
+    pub fn with_baseline(
+        node_id: String,
+        upload_mbps: f64,
+        download_mbps: f64,
+        latency_ms: f64,
+        uptime_percent: f64,
+        stability_percent: f64,
+    ) -> Self {
+        Self {
+            node_id,
+            upload_mbps,
+            download_mbps,
+            latency_ms,
+            uptime_percent,
+            stability_percent,
+            ..Self::default()
+        }
+    }
+
     /// Normalize a value: (val / max) clamped to [0.0, 1.0]
     fn normalize(_self: &Self, val: f64, max: f64) -> f64 {
         if max <= 0.0 {
@@ -58,6 +116,32 @@ impl NodeMetrics {
     /// Inverted normalize for penalties (e.g., latency: higher = worse)
     fn invert_normalize(_self: &Self, val: f64, max: f64) -> f64 {
         1.0 - NodeMetrics::normalize(_self, val, max)
+    }
+
+    fn attestation_ratio(&self, min_attestations: usize) -> f64 {
+        if min_attestations == 0 {
+            return 1.0;
+        }
+
+        (self.unique_attester_count as f64 / min_attestations as f64).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for NodeMetrics {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            upload_mbps: 0.0,
+            download_mbps: 0.0,
+            latency_ms: 0.0,
+            uptime_percent: 0.0,
+            stability_percent: 0.0,
+            identity_score: 0.5,
+            reputation_score: 0.5,
+            attestation_count: 0,
+            unique_attester_count: 0,
+            slashing_penalty: 0.0,
+        }
     }
 }
 
@@ -74,6 +158,18 @@ impl PoiScorer {
 
     pub fn set_stake_weight(&mut self, stake_weight: f64) {
         self.config.stake_weight = stake_weight.clamp(0.0, 1.0);
+    }
+
+    pub fn set_hybrid_min_attestations(&mut self, min_attestations: usize) {
+        self.config.hybrid.min_attestations = min_attestations.max(1);
+    }
+
+    pub fn set_hybrid_weights(&mut self, hybrid: HybridWeights) {
+        self.config.hybrid = hybrid;
+    }
+
+    pub fn hybrid_weights(&self) -> &HybridWeights {
+        &self.config.hybrid
     }
 
     /// Compute PoI score for a node (0.0 = useless, 1.0 = god-tier connection)
@@ -115,18 +211,42 @@ impl PoiScorer {
         score.clamp(0.0, 1.0)
     }
 
-    /// Compute combined weight for a validator: blends PoI score with normalized stake.
-    /// combined = (1 - stake_weight) * poi_score + stake_weight * (stake / max_stake)
-    /// If no one has stake, falls back to pure PoI.
-    pub fn combined_weight(&self, metrics: &NodeMetrics, stake: u64, max_stake: u64) -> f64 {
+    /// Compute the hybrid trust score from PoI, reputation, identity, attestations, and slashing.
+    fn hybrid_score(&self, metrics: &NodeMetrics) -> f64 {
+        let hybrid = &self.config.hybrid;
+        let total_weight =
+            hybrid.poi + hybrid.reputation + hybrid.identity + hybrid.attestation + hybrid.slashing;
+
+        if total_weight <= f64::EPSILON {
+            return self.poi_score(metrics);
+        }
+
         let poi = self.poi_score(metrics);
+        let reputation = metrics.reputation_score.clamp(0.0, 1.0);
+        let identity = metrics.identity_score.clamp(0.0, 1.0);
+        let attestation = metrics.attestation_ratio(hybrid.min_attestations);
+        let slashing = (1.0 - metrics.slashing_penalty).clamp(0.0, 1.0);
+
+        (hybrid.poi * poi
+            + hybrid.reputation * reputation
+            + hybrid.identity * identity
+            + hybrid.attestation * attestation
+            + hybrid.slashing * slashing)
+            / total_weight
+    }
+
+    /// Compute combined weight for a validator: blends hybrid trust score with normalized stake.
+    /// combined = (1 - stake_weight) * trust_score + stake_weight * (stake / max_stake)
+    /// If no one has stake, falls back to pure trust.
+    pub fn combined_weight(&self, metrics: &NodeMetrics, stake: u64, max_stake: u64) -> f64 {
+        let trust = self.hybrid_score(metrics);
         let stake_norm = if max_stake > 0 {
             (stake as f64) / (max_stake as f64)
         } else {
             0.0
         };
         let sw = self.config.stake_weight.clamp(0.0, 1.0);
-        ((1.0 - sw) * poi + sw * stake_norm).max(0.0)
+        ((1.0 - sw) * trust + sw * stake_norm).clamp(0.0, 1.0)
     }
 
     /// Deterministic selection: choose validator using a shared `seed_u128`.
@@ -207,7 +327,7 @@ impl PoiScorer {
         let mut cum_weights: Vec<(String, f64)> = Vec::with_capacity(pool.len());
         let mut total_weight = 0.0f64;
         for (id, metrics) in &sorted_entries {
-            let score = self.poi_score(metrics).max(0.0);
+            let score = self.hybrid_score(metrics).max(0.0);
             let weight = score * 1_000.0;
             total_weight += weight;
             cum_weights.push(((*id).clone(), total_weight));
@@ -231,7 +351,7 @@ impl PoiScorer {
         pool: &mut HashMap<String, NodeMetrics>,
     ) -> HashMap<String, f64> {
         pool.iter()
-            .map(|(id, metrics)| (id.clone(), self.poi_score(metrics)))
+            .map(|(id, metrics)| (id.clone(), self.hybrid_score(metrics)))
             .collect()
     }
 }
@@ -259,6 +379,14 @@ mod tests {
                 stability_percent: 100.0,
             },
             stake_weight: 0.0, // Pure PoI for backward-compatible tests
+            hybrid: HybridWeights {
+                poi: 1.0,
+                reputation: 0.0,
+                identity: 0.0,
+                attestation: 0.0,
+                slashing: 0.0,
+                min_attestations: 3,
+            },
         }
     }
 
@@ -273,6 +401,7 @@ mod tests {
             latency_ms: 0.0,
             uptime_percent: 100.0,
             stability_percent: 100.0,
+            ..Default::default()
         };
         let score = scorer.poi_score(&metrics);
         // Use approximate comparison due to floating point precision
@@ -295,6 +424,7 @@ mod tests {
                 latency_ms: 5.0,
                 uptime_percent: 99.9,
                 stability_percent: 99.9,
+                ..Default::default()
             },
         );
 
@@ -308,6 +438,7 @@ mod tests {
                 latency_ms: 50.0,
                 uptime_percent: 98.0,
                 stability_percent: 97.0,
+                ..Default::default()
             },
         );
 
@@ -321,6 +452,7 @@ mod tests {
                 latency_ms: 180.0,
                 uptime_percent: 80.0,
                 stability_percent: 70.0,
+                ..Default::default()
             },
         );
 
@@ -371,6 +503,7 @@ mod tests {
                 latency_ms: 0.0,
                 uptime_percent: 0.0,
                 stability_percent: 0.0,
+                ..Default::default()
             },
         );
         pool.insert(
@@ -382,6 +515,7 @@ mod tests {
                 latency_ms: 0.0,
                 uptime_percent: 0.0,
                 stability_percent: 0.0,
+                ..Default::default()
             },
         );
 
@@ -410,6 +544,7 @@ mod tests {
                     latency_ms: 30.0,
                     uptime_percent: 99.0,
                     stability_percent: 98.0,
+                    ..Default::default()
                 },
             );
         }
@@ -456,6 +591,7 @@ mod tests {
             latency_ms: 0.0,
             uptime_percent: 100.0,
             stability_percent: 100.0,
+            ..Default::default()
         };
 
         // With 0 stake and max_stake > 0, stake component is 0
@@ -480,6 +616,18 @@ mod tests {
     }
 
     #[test]
+    fn test_attestation_ratio_uses_unique_attesters() {
+        let metrics = NodeMetrics {
+            node_id: "test".to_string(),
+            attestation_count: 6,
+            unique_attester_count: 2,
+            ..Default::default()
+        };
+
+        assert!((metrics.attestation_ratio(3) - (2.0 / 3.0)).abs() < f64::EPSILON * 10.0);
+    }
+
+    #[test]
     fn test_stake_weighted_selection_deterministic() {
         let mut config = build_test_config();
         config.stake_weight = 0.5;
@@ -495,6 +643,7 @@ mod tests {
                 latency_ms: 30.0,
                 uptime_percent: 99.0,
                 stability_percent: 98.0,
+                ..Default::default()
             },
         );
         pool.insert(
@@ -506,6 +655,7 @@ mod tests {
                 latency_ms: 30.0,
                 uptime_percent: 99.0,
                 stability_percent: 98.0,
+                ..Default::default()
             },
         );
 

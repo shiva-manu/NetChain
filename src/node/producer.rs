@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::block::Block;
 use crate::blockchain::Blockchain;
-use crate::consensus::{NodeMetrics, PoiConfig, PoiScorer, Thresholds, Weights};
+use crate::consensus::{HybridWeights, NodeMetrics, PoiConfig, PoiScorer, Thresholds, Weights};
 use crate::mempool::Mempool;
 use crate::state::{ExecutedProposal, State};
 use crate::transaction::SignedTransaction;
@@ -70,6 +70,12 @@ impl BlockProducer {
         }
     }
 
+    /// Align attestation normalization with the aggregator's quorum threshold.
+    pub fn set_min_attestations(&mut self, min_attestations: usize) {
+        self.poi_scorer
+            .set_hybrid_min_attestations(min_attestations);
+    }
+
     /// Create default PoI configuration
     fn default_poi_config() -> PoiConfig {
         PoiConfig {
@@ -88,6 +94,7 @@ impl BlockProducer {
                 stability_percent: 100.0,
             },
             stake_weight: 0.3,
+            hybrid: HybridWeights::default(),
         }
     }
 
@@ -116,6 +123,18 @@ impl BlockProducer {
     pub fn update_peer_metrics(&mut self, node_id: &str, metrics: NodeMetrics) {
         if self.validator_pool.contains_key(node_id) {
             self.validator_pool.insert(node_id.to_string(), metrics);
+        }
+    }
+
+    /// Apply a recent slashing penalty to a validator's trust profile.
+    pub fn penalize_validator(&mut self, node_id: &str, severity: f64) {
+        if let Some(metrics) = self.validator_pool.get_mut(node_id) {
+            let severity = severity.clamp(0.0, 1.0);
+            metrics.slashing_penalty = (metrics.slashing_penalty + severity).clamp(0.0, 1.0);
+            metrics.reputation_score =
+                (metrics.reputation_score * (1.0 - severity * 0.5)).clamp(0.0, 1.0);
+            metrics.identity_score =
+                (metrics.identity_score * (1.0 - severity * 0.25)).clamp(0.0, 1.0);
         }
     }
 
@@ -181,14 +200,7 @@ impl BlockProducer {
 
     /// Create default node metrics for testing
     pub fn default_node_metrics(node_id: String) -> NodeMetrics {
-        NodeMetrics {
-            node_id,
-            upload_mbps: 100.0,
-            download_mbps: 1000.0,
-            latency_ms: 10.0,
-            uptime_percent: 99.9,
-            stability_percent: 99.9,
-        }
+        NodeMetrics::with_baseline(node_id, 100.0, 1000.0, 10.0, 99.9, 99.9)
     }
 
     /// Produce a block from mempool transactions

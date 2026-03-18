@@ -4,6 +4,10 @@
 use anyhow::Result;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Bytes;
+use hyper::header::{
+    HeaderValue, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+    ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE,
+};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -17,7 +21,7 @@ use tracing::{error, info};
 
 use crate::blockchain::Blockchain;
 use crate::mempool::Mempool;
-use crate::p2p::P2PService;
+use crate::p2p::P2PHandle;
 use crate::rpc_types::{RpcRequest, RpcResponse};
 use crate::state::{ProposalStatus, State};
 use crate::transaction::SignedTransaction;
@@ -66,7 +70,24 @@ pub struct RpcState {
     pub blockchain: Arc<Mutex<Blockchain>>,
     pub state: Arc<Mutex<State>>,
     pub mempool: Arc<Mutex<Mempool>>,
-    pub p2p: Arc<Mutex<P2PService>>,
+    pub p2p: P2PHandle,
+}
+
+fn json_response(status: StatusCode, body: String) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
+        .header(
+            ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("POST, OPTIONS"),
+        )
+        .header(
+            ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type"),
+        )
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
 }
 
 /// Handle RPC request
@@ -102,10 +123,8 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
             }
 
             // Broadcast via P2P
-            {
-                let mut p2p = rpc_state.p2p.lock().await;
-                p2p.publish_transaction(tx_json);
-            }
+            let tx_json = serde_json::to_string(&signed_tx).unwrap_or(tx_json);
+            rpc_state.p2p.publish_transaction(tx_json);
 
             let tx_hash = signed_tx.tx_hash_hex();
             RpcResponse::success(serde_json::json!({
@@ -236,15 +255,27 @@ async fn handle_request(
     rpc_state: Arc<RpcState>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    if req.method() == Method::OPTIONS && req.uri().path() == "/rpc" {
+        return Ok(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
+            .header(
+                ACCESS_CONTROL_ALLOW_METHODS,
+                HeaderValue::from_static("POST, OPTIONS"),
+            )
+            .header(
+                ACCESS_CONTROL_ALLOW_HEADERS,
+                HeaderValue::from_static("content-type"),
+            )
+            .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
     // Only accept POST to /rpc
     if req.method() != Method::POST || req.uri().path() != "/rpc" {
         let response = RpcResponse::error("Not found. Use POST /rpc");
         let json = serde_json::to_string(&response).unwrap();
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(json)))
-            .unwrap());
+        return Ok(json_response(StatusCode::NOT_FOUND, json));
     }
 
     // Read body
@@ -264,11 +295,7 @@ async fn handle_request(
             } else {
                 StatusCode::BAD_REQUEST
             };
-            return Ok(Response::builder()
-                .status(status)
-                .header("Content-Type", "application/json")
-                .body(Full::new(Bytes::from(json)))
-                .unwrap());
+            return Ok(json_response(status, json));
         }
     };
 
@@ -278,11 +305,7 @@ async fn handle_request(
         Err(e) => {
             let response = RpcResponse::error(format!("Invalid JSON: {}", e));
             let json = serde_json::to_string(&response).unwrap();
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header("Content-Type", "application/json")
-                .body(Full::new(Bytes::from(json)))
-                .unwrap());
+            return Ok(json_response(StatusCode::BAD_REQUEST, json));
         }
     };
 
@@ -290,11 +313,7 @@ async fn handle_request(
     let response = handle_rpc_request(rpc_state, rpc_request).await;
     let json = serde_json::to_string(&response).unwrap();
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(json)))
-        .unwrap())
+    Ok(json_response(StatusCode::OK, json))
 }
 
 /// Start the RPC server

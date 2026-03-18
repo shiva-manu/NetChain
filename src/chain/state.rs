@@ -653,6 +653,24 @@ impl State {
             .collect()
     }
 
+    /// Compute a persistent slashing penalty factor for a validator.
+    ///
+    /// This is deterministic from state and therefore safe to use in validator selection.
+    pub fn slashing_penalty_for(&self, validator_address: &str) -> f64 {
+        self.slashing_records
+            .iter()
+            .filter(|record| record.validator == validator_address)
+            .fold(0.0f64, |acc, record| {
+                let base_penalty = match record.reason {
+                    SlashReason::InvalidBlockProposal => 0.35,
+                    SlashReason::MetricFraud => 0.25,
+                    SlashReason::MissedBlock => 0.10,
+                };
+                acc + base_penalty
+            })
+            .clamp(0.0, 1.0)
+    }
+
     /// Execute all passed proposals that have expired.
     /// Returns the list of executed proposal IDs for event broadcasting.
     /// This should be called periodically (e.g., after each block) to apply governance decisions.

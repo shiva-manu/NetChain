@@ -1,16 +1,28 @@
 # NetChain
 
-NetChain is an experimental Layer-1 blockchain prototype in Rust built around Proof of Internet (PoI), where validator selection is influenced by measured network performance instead of hashpower or stake alone.
+NetChain is an experimental Layer-1 blockchain prototype in Rust built around a hybrid Proof of Internet consensus model. Validator selection blends measured network performance with stake, identity confidence, reputation, slashing history, and multi-party attestations.
 
 ## Highlights
 
 - Rust blockchain prototype with blocks, chain validation, state, wallet, RPC, and libp2p networking
-- Proof of Internet scoring based on download speed, upload speed, latency, uptime, and stability
+- Hybrid validator scoring that combines Proof of Internet, stake, identity, reputation, slashing, and attestation quorum
 - Peer metric announcements, challenge-response attestations, and anti-gaming validation
-- Native staking and governance transaction types with on-chain proposal voting
-- Explorer-style RPC reads for blocks, accounts, staking positions, and proposals
+- Native staking, governance, and slashing state transitions with on-chain proposal voting
+- Explorer-style RPC reads for blocks, accounts, staking positions, proposals, and health telemetry
 - Persistent local storage with sled
-- Runtime config file support, structured logging, health checks, and metrics endpoint
+- Runtime config file support, structured logging, health checks, and a Prometheus-style metrics endpoint
+
+## Hybrid Consensus Model
+
+NetChain now treats validator selection as a composite signal:
+
+- Proof of Internet measures download speed, upload speed, latency, uptime, and stability.
+- Stake acts as an economic weight instead of the only security signal.
+- Identity and reputation scores reward nodes that remain stable and well-attested over time.
+- Multi-party attestations raise a node's confidence level and reduce the chance of score spoofing.
+- Slashing history applies a persistent trust penalty after invalid blocks, fraudulent metrics, or missed blocks.
+
+This keeps the protocol experimental, but makes the selection model much harder to game than PoI alone.
 
 ## Project Layout
 
@@ -27,7 +39,7 @@ netchain/
 │   ├── chain/               # Blocks, state, transactions
 │   ├── net/                 # P2P, RPC, WebSocket, monitoring
 │   ├── node/                # Mempool, producer, storage
-│   ├── poi/                 # Proof of Internet + anti-gaming
+│   ├── poi/                 # Hybrid consensus + anti-gaming
 │   └── wallet/              # Wallet types + crypto helpers
 └── .github/workflows/ci.yml # CI pipeline
 ```
@@ -115,7 +127,7 @@ Runtime governance defaults:
 WebSocket protocol:
 
 - Connect to `ws://127.0.0.1:8546`
-- Subscribe with `{"action":"subscribe","topics":["new_blocks","new_transactions","proposals"]}`
+- Subscribe with `{"action":"subscribe","topics":["new_blocks","new_transactions","proposals","slashing"]}`
 - Unsubscribe with `{"action":"unsubscribe","topics":["proposals"]}`
 - Ping with `{"action":"ping"}`
 
@@ -129,13 +141,14 @@ npx wscat -c ws://127.0.0.1:8546
 Example WebSocket event:
 
 ```json
-{"event":"proposal_update","data":{"proposal_id":1,"title":"Change reward","status":"Passed","yes_votes":500,"no_votes":0}}
+{"event":"validator_slashed","data":{"validator":"node1","reason":"MetricFraud","amount_burned":250,"remaining_stake":4750}}
 ```
 
 Monitoring endpoints:
 
 - `GET /health` returns JSON health status
 - `GET /metrics` returns Prometheus-style plaintext metrics
+- Health and metrics expose consensus mode, verified/unverified validator counts, slashed validator counts, and average reputation / identity scores.
 
 Example:
 
@@ -185,6 +198,7 @@ GitHub Actions runs:
 - Logs are emitted with `tracing`; use `NETCHAIN_LOG_LEVEL=debug` for more detail.
 - Runtime metrics and health are intentionally lightweight for local development and early testnet-style deployments.
 - The wallet binary is available as `netchain-wallet`.
+- The website under `website/` is route-based and includes the explorer/dashboard UI for live hybrid consensus telemetry.
 
 ## License
 

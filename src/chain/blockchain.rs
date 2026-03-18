@@ -277,7 +277,7 @@ impl Blockchain {
 
         // Validate each block in the candidate fork
         let anchor_ts = &self.chain[fork_point as usize].timestamp;
-        Self::validate_chain_segment(&candidate_blocks, &anchor_hash, anchor_ts)?;
+        Self::validate_chain_segment(&candidate_blocks, fork_point, &anchor_hash, anchor_ts)?;
 
         // Perform the reorganization: truncate our chain at fork point and append the new fork
         let reorged_count = self.chain.len() as u64 - fork_point - 1;
@@ -316,13 +316,24 @@ impl Blockchain {
     /// Validate a chain segment (sequence of blocks) given the hash of the block preceding it.
     fn validate_chain_segment(
         blocks: &[Block],
+        prev_index: u64,
         prev_hash: &str,
         prev_timestamp: &chrono::DateTime<Utc>,
     ) -> Result<(), String> {
         let mut expected_prev_hash = prev_hash.to_string();
         let mut expected_prev_timestamp = prev_timestamp.clone();
+        let mut expected_index = prev_index;
 
         for (i, block) in blocks.iter().enumerate() {
+            if block.index != expected_index + 1 {
+                return Err(format!(
+                    "Invalid index at segment position {} (expected #{}, got #{})",
+                    i,
+                    expected_index + 1,
+                    block.index
+                ));
+            }
+
             if block.previous_hash != expected_prev_hash {
                 return Err(format!(
                     "Invalid previous_hash at segment position {} (block #{})",
@@ -377,6 +388,7 @@ impl Blockchain {
 
             expected_prev_hash = block.hash.clone();
             expected_prev_timestamp = block.timestamp;
+            expected_index = block.index;
         }
 
         Ok(())
@@ -495,5 +507,20 @@ mod tests {
         assert!(result.reorged);
         assert_eq!(bc.height(), 3);
         assert_eq!(bc.chain[1].validator, "fork_val"); // Our local block was replaced
+    }
+
+    #[test]
+    fn test_sync_rejects_non_contiguous_segment() {
+        let mut bc = Blockchain::new();
+        let genesis_hash = bc.chain[0].hash.clone();
+
+        let block1 = Block::new(1, Vec::new(), genesis_hash.clone(), "fork_val".to_string());
+        let block3 = Block::new(3, Vec::new(), block1.hash.clone(), "fork_val".to_string());
+
+        let err = bc
+            .sync_from_blocks(vec![bc.chain[0].clone(), block1, block3])
+            .unwrap_err();
+
+        assert!(err.contains("Invalid index"));
     }
 }
