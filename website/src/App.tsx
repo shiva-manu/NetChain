@@ -10,6 +10,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/sections/navbar";
 import { Footer } from "@/components/sections/footer";
 import { Dashboard } from "@/pages/dashboard";
+import { DocsPage } from "@/pages/docs";
 import { FeaturesPage } from "@/pages/features";
 import { GetStartedPage } from "@/pages/get-started";
 import { GovernancePage } from "@/pages/governance";
@@ -51,6 +52,7 @@ function App() {
           <Route path="technology" element={<TechnologyPage />} />
           <Route path="governance" element={<GovernancePage />} />
           <Route path="get-started" element={<GetStartedPage />} />
+          <Route path="docs" element={<DocsPage />} />
         </Route>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="*" element={<Navigate to="/" replace />} />
