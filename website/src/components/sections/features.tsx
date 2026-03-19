@@ -154,20 +154,20 @@ function FeatureCard({
 
 export function Features() {
   return (
-    <section id="features" className="relative py-24 sm:py-32">
+    <section id="features" className="section-spacing" aria-labelledby="features-title">
       {/* Background decorations */}
       <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true">
         <div className="absolute left-0 top-1/4 h-[400px] w-[400px] rounded-full bg-primary/5 blur-[100px]" />
         <div className="absolute bottom-1/4 right-0 h-[300px] w-[300px] rounded-full bg-accent/5 blur-[100px]" />
       </div>
 
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div className="container-site">
         {/* Section header */}
         <div className="mx-auto max-w-3xl text-center">
-          <span className="mb-4 inline-block text-sm font-semibold uppercase tracking-wider text-primary">
+          <span className="badge-primary mb-4">
             Features
           </span>
-          <h2 className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl lg:text-5xl" style={{ textWrap: "balance" }}>
+          <h2 id="features-title" className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl lg:text-5xl" style={{ textWrap: "balance" }}>
             Everything You Need for a{" "}
             <span className="text-gradient">Modern Blockchain</span>
           </h2>

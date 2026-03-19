@@ -1,78 +1,103 @@
-import { useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 
-interface SEOProps {
+type SEOProps = {
   title?: string;
   description?: string;
   keywords?: string;
   ogImage?: string;
   canonical?: string;
-}
-
-const defaultSEO = {
-  title: 'NetChain - Proof of Internet Blockchain | Layer-1 Network Performance Protocol',
-  description: 'NetChain is a revolutionary Layer-1 blockchain powered by Proof of Internet (PoI). Validator selection based on real network performance metrics - download speed, upload speed, latency, and uptime. Join the future of decentralized networks.',
-  keywords: 'NetChain, Proof of Internet, PoI, blockchain, Layer-1, cryptocurrency, validator, network performance, decentralized, distributed ledger, consensus mechanism, DeFi, Web3',
-  ogImage: 'https://www.netchain.me/og-image.png',
 };
 
-export function SEO({ title, description, keywords, ogImage, canonical }: SEOProps) {
+const baseUrl = "https://www.netchain.me";
+
+const defaultSEO = {
+  title: "NetChain | Experimental Proof of Internet Layer-1",
+  description:
+    "NetChain is an experimental Layer-1 blockchain in Rust that blends measured internet performance with stake, identity, reputation, attestation quorum, and slashing history.",
+  keywords:
+    "NetChain, Proof of Internet, blockchain, Layer-1, Rust blockchain, libp2p, validator telemetry, governance, staking",
+  ogImage: `${baseUrl}/og-image.png`,
+};
+
+function upsertMeta({
+  attribute,
+  key,
+  content,
+}: {
+  attribute: "name" | "property";
+  key: string;
+  content: string;
+}) {
+  let meta = document.head.querySelector(
+    `meta[${attribute}="${key}"]`,
+  ) as HTMLMetaElement | null;
+
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute(attribute, key);
+    document.head.appendChild(meta);
+  }
+
+  meta.content = content;
+}
+
+export function SEO({
+  title,
+  description,
+  keywords,
+  ogImage,
+  canonical,
+}: SEOProps) {
   const location = useLocation();
-  const baseUrl = 'https://www.netchain.me';
-  
+
   const seo = {
-    title: title || defaultSEO.title,
-    description: description || defaultSEO.description,
-    keywords: keywords || defaultSEO.keywords,
-    ogImage: ogImage || defaultSEO.ogImage,
-    canonical: canonical || `${baseUrl}${location.pathname}`,
+    title: title ?? defaultSEO.title,
+    description: description ?? defaultSEO.description,
+    keywords: keywords ?? defaultSEO.keywords,
+    ogImage: ogImage ?? defaultSEO.ogImage,
+    canonical: canonical ?? `${baseUrl}${location.pathname}`,
   };
 
   useEffect(() => {
-    // Update title
     document.title = seo.title;
 
-    // Update or create meta tags
-    const updateMeta = (name: string, content: string, property = false) => {
-      const attr = property ? 'property' : 'name';
-      let meta = document.querySelector(`meta[${attr}="${name}"]`) as HTMLMetaElement;
-      
-      if (!meta) {
-        meta = document.createElement('meta');
-        meta.setAttribute(attr, name);
-        document.head.appendChild(meta);
-      }
-      
-      meta.content = content;
-    };
+    upsertMeta({ attribute: "name", key: "description", content: seo.description });
+    upsertMeta({ attribute: "name", key: "keywords", content: seo.keywords });
+    upsertMeta({ attribute: "name", key: "theme-color", content: "#f5f2ea" });
 
-    // Standard meta tags
-    updateMeta('description', seo.description);
-    updateMeta('keywords', seo.keywords);
+    upsertMeta({ attribute: "property", key: "og:type", content: "website" });
+    upsertMeta({ attribute: "property", key: "og:title", content: seo.title });
+    upsertMeta({
+      attribute: "property",
+      key: "og:description",
+      content: seo.description,
+    });
+    upsertMeta({ attribute: "property", key: "og:url", content: seo.canonical });
+    upsertMeta({ attribute: "property", key: "og:image", content: seo.ogImage });
+    upsertMeta({ attribute: "property", key: "og:site_name", content: "NetChain" });
 
-    // Open Graph tags
-    updateMeta('og:title', seo.title, true);
-    updateMeta('og:description', seo.description, true);
-    updateMeta('og:url', seo.canonical, true);
-    updateMeta('og:image', seo.ogImage, true);
+    upsertMeta({ attribute: "name", key: "twitter:card", content: "summary_large_image" });
+    upsertMeta({ attribute: "name", key: "twitter:title", content: seo.title });
+    upsertMeta({
+      attribute: "name",
+      key: "twitter:description",
+      content: seo.description,
+    });
+    upsertMeta({ attribute: "name", key: "twitter:image", content: seo.ogImage });
 
-    // Twitter tags
-    updateMeta('twitter:title', seo.title, true);
-    updateMeta('twitter:description', seo.description, true);
-    updateMeta('twitter:image', seo.ogImage, true);
+    let canonicalLink = document.head.querySelector(
+      'link[rel="canonical"]',
+    ) as HTMLLinkElement | null;
 
-    // Update canonical link
-    let canonicalLink = document.querySelector('link[rel="canonical"]') as HTMLLinkElement;
-    
     if (!canonicalLink) {
-      canonicalLink = document.createElement('link');
-      canonicalLink.rel = 'canonical';
+      canonicalLink = document.createElement("link");
+      canonicalLink.rel = "canonical";
       document.head.appendChild(canonicalLink);
     }
-    
-    canonicalLink.href = seo.canonical;
 
-  }, [seo.title, seo.description, seo.keywords, seo.ogImage, seo.canonical]);
+    canonicalLink.href = seo.canonical;
+  }, [seo.canonical, seo.description, seo.keywords, seo.ogImage, seo.title]);
 
   return null;
 }

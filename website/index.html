@@ -4,95 +4,72 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    
-    <!-- Primary Meta Tags -->
-    <title>NetChain - Proof of Internet Blockchain | Layer-1 Network Performance Protocol</title>
-    <meta name="title" content="NetChain - Proof of Internet Blockchain | Layer-1 Network Performance Protocol" />
-    <meta name="description" content="NetChain is a revolutionary Layer-1 blockchain powered by Proof of Internet (PoI). Validator selection based on real network performance metrics - download speed, upload speed, latency, and uptime. Join the future of decentralized networks." />
-    <meta name="keywords" content="NetChain, Proof of Internet, PoI, blockchain, Layer-1, cryptocurrency, validator, network performance, decentralized, distributed ledger, consensus mechanism, DeFi, Web3" />
+    <title>NetChain | Experimental Proof of Internet Layer-1</title>
+    <meta
+      name="description"
+      content="NetChain is an experimental Layer-1 blockchain in Rust that combines measured internet performance with stake, reputation, identity confidence, attestation quorum, and slashing history."
+    />
+    <meta
+      name="keywords"
+      content="NetChain, Proof of Internet, Layer-1 blockchain, Rust blockchain, validator telemetry, governance, staking, libp2p"
+    />
     <meta name="author" content="NetChain" />
     <meta name="robots" content="index, follow" />
-    <meta name="language" content="English" />
-    <meta name="revisit-after" content="7 days" />
-    
-    <!-- Canonical URL -->
+    <meta name="theme-color" content="#f5f2ea" />
     <link rel="canonical" href="https://www.netchain.me/" />
-    
-    <!-- Open Graph / Facebook -->
+
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://www.netchain.me/" />
-    <meta property="og:title" content="NetChain - Proof of Internet Blockchain" />
-    <meta property="og:description" content="Revolutionary Layer-1 blockchain powered by Proof of Internet. Validator selection based on real network performance - not hashpower or stake alone." />
+    <meta
+      property="og:title"
+      content="NetChain | Experimental Proof of Internet Layer-1"
+    />
+    <meta
+      property="og:description"
+      content="An experimental Rust Layer-1 that treats internet performance as a first-class consensus signal alongside stake, attestations, reputation, and governance."
+    />
     <meta property="og:image" content="https://www.netchain.me/og-image.png" />
     <meta property="og:site_name" content="NetChain" />
-    <meta property="og:locale" content="en_US" />
-    
-    <!-- Twitter -->
-    <meta property="twitter:card" content="summary_large_image" />
-    <meta property="twitter:url" content="https://www.netchain.me/" />
-    <meta property="twitter:title" content="NetChain - Proof of Internet Blockchain" />
-    <meta property="twitter:description" content="Revolutionary Layer-1 blockchain powered by Proof of Internet. Validator selection based on real network performance." />
-    <meta property="twitter:image" content="https://www.netchain.me/og-image.png" />
-    
-    <!-- Additional SEO Meta Tags -->
-    <meta name="theme-color" content="#000000" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
-    <meta name="apple-mobile-web-app-title" content="NetChain" />
-    
-    <!-- Structured Data - Organization Schema -->
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="NetChain | Experimental Proof of Internet Layer-1"
+    />
+    <meta
+      name="twitter:description"
+      content="An experimental Rust Layer-1 that blends Proof of Internet telemetry with stake, attestation quorum, reputation, and runtime governance."
+    />
+    <meta name="twitter:image" content="https://www.netchain.me/og-image.png" />
+
     <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "Organization",
-      "name": "NetChain",
-      "url": "https://www.netchain.me",
-      "logo": "https://www.netchain.me/logo.png",
-      "description": "NetChain is a Layer-1 blockchain powered by Proof of Internet (PoI). Validator selection based on real network performance metrics.",
-      "sameAs": [
-        "https://github.com/netchain",
-        "https://twitter.com/netchain",
-        "https://discord.gg/netchain"
-      ]
-    }
-    </script>
-    
-    <!-- Structured Data - WebSite Schema -->
-    <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "WebSite",
-      "name": "NetChain",
-      "url": "https://www.netchain.me",
-      "description": "Proof of Internet Blockchain - Layer-1 Network Performance Protocol",
-      "potentialAction": {
-        "@type": "SearchAction",
-        "target": "https://www.netchain.me/search?q={search_term_string}",
-        "query-input": "required name=search_term_string"
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "NetChain",
+        "url": "https://www.netchain.me",
+        "description": "Experimental Layer-1 blockchain built in Rust around a hybrid Proof of Internet consensus model.",
+        "sameAs": ["https://github.com/shiva-manu/NetChain"]
       }
-    }
     </script>
-    
-    <!-- Structured Data - Software Application Schema -->
+
     <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "SoftwareApplication",
-      "name": "NetChain",
-      "applicationCategory": "Blockchain",
-      "operatingSystem": "Linux, macOS, Windows",
-      "description": "NetChain is a Layer-1 blockchain with Proof of Internet consensus mechanism. Validators are selected based on network performance metrics.",
-      "offers": {
-        "@type": "Offer",
-        "price": "0",
-        "priceCurrency": "USD"
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "NetChain",
+        "codeRepository": "https://github.com/shiva-manu/NetChain",
+        "programmingLanguage": "Rust",
+        "description": "Experimental Layer-1 blockchain with Proof of Internet, staking, governance, RPC, WebSocket, and monitoring surfaces."
       }
-    }
     </script>
-    
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>

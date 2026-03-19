@@ -1,14 +1,8 @@
 import { useEffect } from "react";
-import {
-  Navigate,
-  Outlet,
-  Route,
-  Routes,
-  useLocation,
-} from "react-router-dom";
-import { ThemeProvider } from "@/components/theme-provider";
-import { Navbar } from "@/components/sections/navbar";
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+
 import { Footer } from "@/components/sections/footer";
+import { Navbar } from "@/components/sections/navbar";
 import { Dashboard } from "@/pages/dashboard";
 import { DocsPage } from "@/pages/docs";
 import { FeaturesPage } from "@/pages/features";
@@ -31,8 +25,14 @@ function RouteEffects() {
 function MarketingLayout() {
   return (
     <div className="relative min-h-dvh">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-full focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-foreground"
+      >
+        Skip to main content
+      </a>
       <Navbar />
-      <main>
+      <main id="main-content">
         <Outlet />
       </main>
       <Footer />
@@ -42,7 +42,7 @@ function MarketingLayout() {
 
 function App() {
   return (
-    <ThemeProvider defaultTheme="dark" storageKey="netchain-ui-theme">
+    <>
       <RouteEffects />
       <Routes>
         <Route element={<MarketingLayout />}>
@@ -57,7 +57,7 @@ function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </ThemeProvider>
+    </>
   );
 }
 
