@@ -22,18 +22,6 @@ function RouteEffects() {
 
   useEffect(() => {
     window.scrollTo(0, 0);
-
-    const titles: Record<string, string> = {
-      "/": "NetChain",
-      "/features": "Features · NetChain",
-      "/how-it-works": "How It Works · NetChain",
-      "/technology": "Technology · NetChain",
-      "/governance": "Governance · NetChain",
-      "/get-started": "Get Started · NetChain",
-      "/dashboard": "Explorer · NetChain",
-    };
-
-    document.title = titles[location.pathname] ?? "NetChain";
   }, [location.pathname]);
 
   return null;

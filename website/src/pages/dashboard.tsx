@@ -30,6 +30,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 
+import { SEO } from "@/components/seo";
 import { Footer } from "@/components/sections/footer";
 import { Navbar } from "@/components/sections/navbar";
 import { Badge } from "@/components/ui/badge";
@@ -1175,6 +1176,11 @@ export function Dashboard() {
 
   return (
     <div className="relative min-h-dvh overflow-hidden">
+      <SEO
+        title="NetChain Explorer - Live Blockchain Dashboard | NetChain"
+        description="Explore the NetChain blockchain in real-time: view blocks, transactions, validator metrics, governance proposals, network health, and wallet information on the Proof of Internet network."
+        keywords="NetChain explorer, blockchain explorer, block explorer, transaction explorer, validator metrics, network health, PoI dashboard, blockchain analytics"
+      />
       <div
         className="pointer-events-none absolute inset-0 -z-10"
         aria-hidden="true"

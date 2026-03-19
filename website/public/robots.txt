@@ -1,0 +1,25 @@
+# NetChain Robots.txt
+User-agent: *
+Allow: /
+
+# Sitemaps
+Sitemap: https://www.netchain.me/sitemap.xml
+
+# Crawl delay (optional)
+Crawl-delay: 1
+
+# Specific crawlers
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Slurp
+Allow: /
+
+# Disallow admin or sensitive paths if any
+User-agent: *
+Disallow: /admin/
+Disallow: /api/
+Disallow: /*.json$

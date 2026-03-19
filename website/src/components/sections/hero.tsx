@@ -54,7 +54,7 @@ export function Hero() {
               <ArrowRight className="size-4" aria-hidden="true" />
             </Link>
             <a
-              href="https://github.com/example/netchain"
+              href="https://github.com/shiva-manu/NetChain"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex h-11 cursor-pointer items-center justify-center gap-2 rounded-lg border border-border bg-background px-6 text-base font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"

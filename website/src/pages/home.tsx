@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { SEO } from "@/components/seo";
 import { Hero } from "@/components/sections/hero";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -95,6 +96,11 @@ function RouteCardTile({ card }: { card: RouteCard }) {
 export function HomePage() {
   return (
     <div>
+      <SEO
+        title="NetChain - Proof of Internet Blockchain | Revolutionary Layer-1 Network"
+        description="NetChain is the world's first Proof of Internet (PoI) blockchain. Validators are selected based on real network performance: download speed, upload speed, latency, and uptime. Join the decentralized network revolution."
+        keywords="NetChain, Proof of Internet, PoI blockchain, Layer-1 blockchain, network performance blockchain, decentralized validator, cryptocurrency, Web3, DeFi, distributed ledger"
+      />
       <Hero />
 
       <section className="border-y border-border/40 bg-muted/20 py-20 sm:py-28">

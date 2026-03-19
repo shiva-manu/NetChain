@@ -76,7 +76,7 @@ export function Navbar() {
         <div className="hidden items-center gap-2 md:flex">
           <ThemeToggle />
           <a
-            href="https://github.com/example/netchain"
+            href="https://github.com/shiva-manu/NetChain"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex h-8 cursor-pointer items-center justify-center rounded-lg border border-border bg-background px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted"
