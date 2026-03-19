@@ -18,9 +18,9 @@ type RpcBody = {
   params?: unknown;
 };
 
-// Live NetChain node endpoints - can be overridden via environment variables
-const DEFAULT_RPC_URL = import.meta.env.VITE_NETCHAIN_RPC_URL || "https://api.netchain.me";
-const DEFAULT_MONITORING_URL = import.meta.env.VITE_NETCHAIN_MONITORING_URL || "https://api.netchain.me";
+// Live NetChain node endpoints
+const DEFAULT_RPC_URL = "https://api.netchain.me";
+const DEFAULT_MONITORING_URL = "https://api.netchain.me";
 
 function trimTrailingSlash(url: string) {
   return url.replace(/\/+$/, "");
