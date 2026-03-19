@@ -109,6 +109,43 @@ See **DEPLOYMENT.md** for complete manual instructions.
 
 ## Post-Deployment
 
+### Enable HTTPS (Recommended)
+
+Set up SSL/HTTPS with automatic Let's Encrypt certificates:
+
+**1. Add DNS Record**
+
+Add an A record pointing your subdomain to your EC2 IP:
+| Type | Name | Value |
+|------|------|-------|
+| A | api | YOUR_EC2_IP |
+
+**2. Open Port 443 in AWS Security Group**
+```bash
+# AWS Console: EC2 > Security Groups > Edit inbound rules
+# Add: HTTPS (443) from 0.0.0.0/0
+```
+
+**3. Run SSL Setup Script**
+```bash
+ssh -i ~/.ssh/your-key.pem ubuntu@YOUR_EC2_IP
+cd ~/NetChain
+sudo bash scripts/setup-ssl.sh api.yourdomain.com
+```
+
+**4. Verify HTTPS**
+```bash
+curl https://api.yourdomain.com/health
+curl https://api.yourdomain.com/metrics
+```
+
+Your endpoints will be:
+- RPC: `https://api.yourdomain.com/rpc`
+- WebSocket: `wss://api.yourdomain.com/ws`
+- Metrics: `https://api.yourdomain.com/metrics`
+
+---
+
 ### Check Node Status
 ```bash
 sudo systemctl status netchain
@@ -142,12 +179,14 @@ sudo ufw status         # Firewall
 
 ```bash
 sudo ufw allow 22/tcp       # SSH
+sudo ufw allow 80/tcp       # HTTP (for Let's Encrypt)
+sudo ufw allow 443/tcp      # HTTPS
 sudo ufw allow 30333/tcp    # P2P
-sudo ufw allow 8545/tcp     # RPC
-sudo ufw allow 8546/tcp     # WebSocket
 
-# Restrict monitoring to your IP
-sudo ufw allow from YOUR_IP to any port 9090
+# Only if NOT using HTTPS reverse proxy:
+# sudo ufw allow 8545/tcp   # RPC (direct)
+# sudo ufw allow 8546/tcp   # WebSocket (direct)
+# sudo ufw allow from YOUR_IP to any port 9090  # Metrics
 
 sudo ufw enable
 ```
@@ -204,8 +243,9 @@ du -sh ~/NetChain/data/*
 
 ## Security Checklist
 
+- [ ] Enable HTTPS with SSL certificates (scripts/setup-ssl.sh)
 - [ ] Restrict SSH to your IP only
-- [ ] Restrict monitoring port (9090) to your IP
+- [ ] Close direct ports (8545, 8546, 9090) - use HTTPS proxy instead
 - [ ] Enable UFW firewall
 - [ ] Use SSH keys (disable password auth)
 - [ ] Enable automatic security updates

@@ -2,5 +2,13 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
-  "installCommand": "npm install --legacy-peer-deps"
+  "installCommand": "npm install --legacy-peer-deps",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "env": {
+    "VITE_NETCHAIN_RPC_URL": "https://api.netchain.me",
+    "VITE_NETCHAIN_MONITORING_URL": "https://api.netchain.me",
+    "VITE_NETCHAIN_WS_URL": "wss://api.netchain.me/ws"
+  }
 }

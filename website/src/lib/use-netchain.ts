@@ -23,7 +23,7 @@ import type {
 const DEFAULT_ENDPOINTS: NetChainEndpoints = {
   rpcUrl: DEFAULT_RPC_URL,
   monitoringUrl: DEFAULT_MONITORING_URL,
-  wsUrl: "ws://127.0.0.1:8546",
+  wsUrl: import.meta.env.VITE_NETCHAIN_WS_URL || "wss://api.netchain.me/ws",
 };
 
 const STORAGE_KEY = "netchain-dashboard-endpoints";
