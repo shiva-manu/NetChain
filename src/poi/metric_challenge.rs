@@ -229,13 +229,10 @@ impl MetricChallengeService {
         let mut total_read = 0;
 
         while total_read < bytes_to_download {
-            let read = timeout(
-                timeout_duration,
-                stream.read(&mut buffer[total_read..]),
-            )
-            .await
-            .map_err(|_| "Read timeout")?
-            .map_err(|e| format!("Read failed: {}", e))?;
+            let read = timeout(timeout_duration, stream.read(&mut buffer[total_read..]))
+                .await
+                .map_err(|_| "Read timeout")?
+                .map_err(|e| format!("Read failed: {}", e))?;
 
             if read == 0 {
                 break; // EOF
@@ -474,10 +471,14 @@ impl MetricChallengeService {
             return None;
         }
 
-        let avg_download = challenges.iter().map(|c| c.download_mbps).sum::<f64>() / challenges.len() as f64;
-        let avg_upload = challenges.iter().map(|c| c.upload_mbps).sum::<f64>() / challenges.len() as f64;
-        let avg_latency = challenges.iter().map(|c| c.latency_ms).sum::<f64>() / challenges.len() as f64;
-        let avg_confidence = challenges.iter().map(|c| c.confidence).sum::<f64>() / challenges.len() as f64;
+        let avg_download =
+            challenges.iter().map(|c| c.download_mbps).sum::<f64>() / challenges.len() as f64;
+        let avg_upload =
+            challenges.iter().map(|c| c.upload_mbps).sum::<f64>() / challenges.len() as f64;
+        let avg_latency =
+            challenges.iter().map(|c| c.latency_ms).sum::<f64>() / challenges.len() as f64;
+        let avg_confidence =
+            challenges.iter().map(|c| c.confidence).sum::<f64>() / challenges.len() as f64;
 
         Some(NodeMetrics {
             node_id: target_id.to_string(),
@@ -532,7 +533,8 @@ impl MetricChallengeService {
             let to_remove: Vec<String> = outgoing
                 .iter()
                 .filter(|(_, c)| {
-                    !c.completed && now.saturating_sub(c.issued_at) > self.config.challenge_timeout_secs
+                    !c.completed
+                        && now.saturating_sub(c.issued_at) > self.config.challenge_timeout_secs
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
@@ -637,9 +639,7 @@ mod tests {
         let service = MetricChallengeService::new(config, signing_key, "test_node".to_string());
 
         // Create a challenge
-        let _ = service
-            .create_challenge("peer1".to_string())
-            .await;
+        let _ = service.create_challenge("peer1".to_string()).await;
 
         assert_eq!(service.active_challenge_count().await, 1);
 

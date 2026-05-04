@@ -4,7 +4,7 @@
 // Handles epoch boundaries, validator rotation, reputation decay, and rewards distribution.
 
 use crate::consensus::{HybridWeights, NodeMetrics, PoiConfig, PoiScorer, Thresholds, Weights};
-use crate::state::{ChainParams, SlashRecord, SlashReason, State};
+use crate::state::{ChainParams, SlashReason, SlashRecord, State};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -39,8 +39,8 @@ impl Default for EpochConfig {
             history_epochs: 10,
             min_attestations_for_validator: 3,
             max_active_validators: 100,
-            reputation_decay: 0.95, // 5% decay per epoch
-            missed_epoch_slash_bps: 500, // 5% of stake
+            reputation_decay: 0.95,       // 5% decay per epoch
+            missed_epoch_slash_bps: 500,  // 5% of stake
             top_performer_bonus_bps: 200, // 2% bonus
             top_performer_count: 10,
         }
@@ -113,9 +113,7 @@ impl EpochManager {
             current_epoch: 0,
             epoch_start_block: 0,
             epoch_start_timestamp: 0,
-            epoch_history: Arc::new(RwLock::new(VecDeque::with_capacity(
-                history_epochs + 1,
-            ))),
+            epoch_history: Arc::new(RwLock::new(VecDeque::with_capacity(history_epochs + 1))),
             validator_performance: Arc::new(RwLock::new(HashMap::new())),
             active_validators: Arc::new(RwLock::new(active_validators)),
             active_producers: Arc::new(RwLock::new(HashSet::new())),
@@ -164,8 +162,8 @@ impl EpochManager {
 
         // Update average block time
         let total_blocks = perf.blocks_produced as f64;
-        perf.avg_block_time_ms = ((perf.avg_block_time_ms * (total_blocks - 1.0)) + block_time_ms)
-            / total_blocks;
+        perf.avg_block_time_ms =
+            ((perf.avg_block_time_ms * (total_blocks - 1.0)) + block_time_ms) / total_blocks;
 
         producers.insert(validator_id.to_string());
 
@@ -210,10 +208,7 @@ impl EpochManager {
     /// Get validator performance for current epoch
     pub async fn get_validator_performance(&self, validator_id: &str) -> ValidatorPerformance {
         let performance = self.validator_performance.read().await;
-        performance
-            .get(validator_id)
-            .cloned()
-            .unwrap_or_default()
+        performance.get(validator_id).cloned().unwrap_or_default()
     }
 
     /// Compute validator scores based on epoch performance
@@ -225,10 +220,7 @@ impl EpochManager {
         let mut scores = HashMap::new();
 
         for (validator_id, node_metrics) in metrics {
-            let perf = performance
-                .get(validator_id)
-                .cloned()
-                .unwrap_or_default();
+            let perf = performance.get(validator_id).cloned().unwrap_or_default();
 
             // Base score from PoI metrics
             let poi_scorer = PoiScorer::new(PoiConfig {
@@ -305,7 +297,13 @@ impl EpochManager {
             end_block,
             start_timestamp: self.epoch_start_timestamp,
             end_timestamp,
-            active_validators: self.active_validators.read().await.iter().cloned().collect(),
+            active_validators: self
+                .active_validators
+                .read()
+                .await
+                .iter()
+                .cloned()
+                .collect(),
             active_producers: producers.clone(),
             validator_scores: scores.clone(),
             total_blocks: end_block - self.epoch_start_block,
@@ -323,9 +321,7 @@ impl EpochManager {
         {
             let mut cumulative_scores = self.validator_scores.write().await;
             for (validator_id, score) in &scores {
-                let cumulative = cumulative_scores
-                    .entry(validator_id.clone())
-                    .or_insert(0.0);
+                let cumulative = cumulative_scores.entry(validator_id.clone()).or_insert(0.0);
                 // Weighted average: 70% historical, 30% new
                 *cumulative = (*cumulative * 0.7) + (score * 0.3);
             }
@@ -381,7 +377,8 @@ impl EpochManager {
         state: &mut State,
     ) {
         // Sort validators by score for top performer bonus
-        let mut sorted_validators: Vec<(&String, &f64)> = snapshot.validator_scores.iter().collect();
+        let mut sorted_validators: Vec<(&String, &f64)> =
+            snapshot.validator_scores.iter().collect();
         sorted_validators.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Get top performers
@@ -442,15 +439,13 @@ impl EpochManager {
             if let Some(stake) = state.stakes.get(validator_id) {
                 if stake.amount > 0 {
                     // Slash for missing entire epoch
-                    let slash_amount =
-                        stake.amount.saturating_mul(self.config.missed_epoch_slash_bps) / 10_000;
+                    let slash_amount = stake
+                        .amount
+                        .saturating_mul(self.config.missed_epoch_slash_bps)
+                        / 10_000;
 
                     if slash_amount > 0 {
-                        state.slash_stake(
-                            validator_id,
-                            SlashReason::MissedBlock,
-                            timestamp,
-                        );
+                        state.slash_stake(validator_id, SlashReason::MissedBlock, timestamp);
 
                         warn!(
                             validator = validator_id,
@@ -580,7 +575,10 @@ impl EpochManager {
     /// Get epoch snapshot by number
     pub async fn get_epoch_snapshot(&self, epoch_number: u64) -> Option<EpochSnapshot> {
         let history = self.epoch_history.read().await;
-        history.iter().find(|s| s.epoch_number == epoch_number).cloned()
+        history
+            .iter()
+            .find(|s| s.epoch_number == epoch_number)
+            .cloned()
     }
 
     /// Get validator's cumulative score
@@ -598,10 +596,7 @@ impl EpochManager {
     /// Get validator performance summary
     pub async fn get_performance_summary(&self, validator_id: &str) -> ValidatorPerformanceSummary {
         let performance = self.validator_performance.read().await;
-        let perf = performance
-            .get(validator_id)
-            .cloned()
-            .unwrap_or_default();
+        let perf = performance.get(validator_id).cloned().unwrap_or_default();
 
         let total_turns = perf.blocks_produced + perf.blocks_missed;
         let success_rate = if total_turns > 0 {

@@ -3,8 +3,8 @@
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio::time::{interval, sleep, Duration};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -13,7 +13,7 @@ use netchain::anti_gaming::{self, AntiGamingService};
 use netchain::block::Block;
 use netchain::blockchain::Blockchain;
 use netchain::config::AppConfig;
-use netchain::dht::{DhtService, DhtConfig, DhtEvent};
+use netchain::dht::{DhtConfig, DhtEvent, DhtService};
 use netchain::epoch_manager::{EpochConfig, EpochManager};
 use netchain::measurement::MeasurementService;
 use netchain::mempool::Mempool;
@@ -315,10 +315,7 @@ async fn main() -> Result<()> {
         top_performer_bonus_bps: config.epoch.top_performer_bonus_bps,
         top_performer_count: config.epoch.top_performer_count,
     };
-    let epoch_manager = Arc::new(EpochManager::new(
-        epoch_config,
-        vec![local_peer_id.clone()],
-    ));
+    let epoch_manager = Arc::new(EpochManager::new(epoch_config, vec![local_peer_id.clone()]));
     info!("epoch manager initialized");
 
     // Metric challenge service for P2P bandwidth verification
@@ -657,13 +654,15 @@ async fn main() -> Result<()> {
                     }
 
                     if challenge_service.can_challenge_peer(&node_id).await {
-                        if let Some(challenge) = challenge_service.create_challenge(node_id.clone()).await {
+                        if let Some(challenge) =
+                            challenge_service.create_challenge(node_id.clone()).await
+                        {
                             info!(
                                 target = challenge.target_id,
                                 nonce = challenge.challenge_nonce,
                                 "initiating metric challenge"
                             );
-                            
+
                             // Send challenge via P2P
                             challenge_p2p.send_metric_challenge(
                                 challenge.target_id.clone(),
@@ -673,7 +672,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                
+
                 // Cleanup expired challenges
                 let cleaned = challenge_service.cleanup_expired_challenges().await;
                 if cleaned > 0 {
@@ -691,7 +690,7 @@ async fn main() -> Result<()> {
         let _dht_producer = producer.clone();
         let _dht_state = state.clone();
         let dht_p2p = p2p_handle.clone();
-        
+
         tokio::spawn(async move {
             while let Some(dht_event) = dht_event_rx.recv().await {
                 match dht_event {
@@ -720,7 +719,11 @@ async fn main() -> Result<()> {
                         info!("DHT bootstrap completed");
                     }
                     DhtEvent::RecordFound { key, value } => {
-                        debug!(key_len = key.len(), value_len = value.len(), "DHT record found");
+                        debug!(
+                            key_len = key.len(),
+                            value_len = value.len(),
+                            "DHT record found"
+                        );
                     }
                 }
             }
@@ -1527,7 +1530,14 @@ mod tests {
         let addr = pubkey_to_address_hex(&kp.verifying_key());
 
         let base_time = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
-        let genesis = Block::new_at(0, vec![], "0".to_string(), "genesis".to_string(), base_time, String::new());
+        let genesis = Block::new_at(
+            0,
+            vec![],
+            "0".to_string(),
+            "genesis".to_string(),
+            base_time,
+            String::new(),
+        );
 
         let reward_block_1 = Block::new_at(
             1,

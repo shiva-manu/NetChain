@@ -19,10 +19,10 @@ pub mod dht;
 pub mod epoch_manager;
 #[path = "poi/measurement.rs"]
 pub mod measurement;
-#[path = "poi/metric_challenge.rs"]
-pub mod metric_challenge;
 #[path = "node/mempool.rs"]
 pub mod mempool;
+#[path = "poi/metric_challenge.rs"]
+pub mod metric_challenge;
 #[path = "poi/metrics_aggregator.rs"]
 pub mod metrics_aggregator;
 #[path = "net/monitoring.rs"]

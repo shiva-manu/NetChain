@@ -125,11 +125,10 @@ impl Block {
             Err(_) => return false,
         };
 
-        let verifying_key =
-            match ed25519_dalek::VerifyingKey::try_from(pubkey_bytes.as_slice()) {
-                Ok(k) => k,
-                Err(_) => return false,
-            };
+        let verifying_key = match ed25519_dalek::VerifyingKey::try_from(pubkey_bytes.as_slice()) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
 
         let signature = match ed25519_dalek::Signature::try_from(proof_bytes.as_slice()) {
             Ok(s) => s,

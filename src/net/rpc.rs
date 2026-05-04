@@ -13,11 +13,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use sha2::Digest;
 use tracing::{error, info};
 
 use crate::blockchain::Blockchain;
@@ -260,7 +260,11 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
             let mut state = rpc_state.state.lock().await;
 
             // Ensure source has enough balance
-            let source_balance = state.accounts.get(FAUCET_SOURCE).map(|a| a.balance).unwrap_or(0);
+            let source_balance = state
+                .accounts
+                .get(FAUCET_SOURCE)
+                .map(|a| a.balance)
+                .unwrap_or(0);
             if source_balance < FAUCET_AMOUNT {
                 return RpcResponse::error("Faucet is empty");
             }
@@ -271,9 +275,10 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
             }
 
             // Credit recipient
-            let recipient = state.accounts.entry(address.clone()).or_insert_with(|| {
-                crate::state::Account::new(0)
-            });
+            let recipient = state
+                .accounts
+                .entry(address.clone())
+                .or_insert_with(|| crate::state::Account::new(0));
             recipient.balance += FAUCET_AMOUNT;
 
             // Generate a synthetic tx hash

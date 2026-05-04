@@ -119,7 +119,11 @@ impl Blockchain {
         let tx_total_bytes: usize = block
             .transactions
             .iter()
-            .map(|tx| bincode::serde::encode_to_vec(tx, config).unwrap_or_default().len())
+            .map(|tx| {
+                bincode::serde::encode_to_vec(tx, config)
+                    .unwrap_or_default()
+                    .len()
+            })
             .sum();
         if tx_total_bytes > crate::mempool::MAX_BLOCK_SIZE_BYTES {
             return Err(format!(

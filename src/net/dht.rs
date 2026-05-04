@@ -3,6 +3,7 @@
 // Kademlia DHT integration for peer discovery beyond local network mDNS.
 // Provides internet-scale peer discovery with bootstrap nodes.
 
+use futures_util::StreamExt;
 use libp2p::{
     core::transport::upgrade::Version,
     identity::Keypair,
@@ -16,7 +17,6 @@ use libp2p::{
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId, Transport,
 };
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -119,7 +119,9 @@ pub enum DhtCommand {
     /// Remove a peer from the routing table
     RemovePeer { peer_id: PeerId },
     /// Get peers from the routing table
-    GetPeers { response_tx: UnboundedSender<HashSet<PeerId>> },
+    GetPeers {
+        response_tx: UnboundedSender<HashSet<PeerId>>,
+    },
     /// Get closest peers to a key
     GetClosestPeers {
         key: Vec<u8>,
@@ -137,9 +139,7 @@ pub enum DhtCommand {
         response_tx: UnboundedSender<Option<Vec<u8>>>,
     },
     /// Trigger bootstrap
-    Bootstrap {
-        response_tx: UnboundedSender<bool>,
-    },
+    Bootstrap { response_tx: UnboundedSender<bool> },
 }
 
 /// DHT events
@@ -283,7 +283,11 @@ impl DhtService {
                         .unwrap()
                 });
                 kademlia.add_address(&peer_id, addr.clone());
-                debug!("Added bootstrap node: {} at {}", bootstrap.name.as_deref().unwrap_or("unknown"), addr);
+                debug!(
+                    "Added bootstrap node: {} at {}",
+                    bootstrap.name.as_deref().unwrap_or("unknown"),
+                    addr
+                );
             }
         }
 
@@ -303,19 +307,15 @@ impl DhtService {
         );
 
         // Listen on configured port
-        let listen_addr: Multiaddr = multiaddr![
-            Ip4([0, 0, 0, 0]),
-            Tcp(config.dht_port)
-        ];
+        let listen_addr: Multiaddr = multiaddr![Ip4([0, 0, 0, 0]), Tcp(config.dht_port)];
         swarm.listen_on(listen_addr)?;
 
         // Create command channel
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         // Create bootstrap interval
-        let bootstrap_interval = tokio::time::interval(Duration::from_secs(
-            config.bootstrap_interval_secs,
-        ));
+        let bootstrap_interval =
+            tokio::time::interval(Duration::from_secs(config.bootstrap_interval_secs));
 
         let service = Self {
             local_peer_id,
@@ -332,11 +332,7 @@ impl DhtService {
 
     /// Get multiaddr for this node
     pub fn get_multiaddr(&self, port: u16) -> Multiaddr {
-        multiaddr![
-            Ip4([0, 0, 0, 0]),
-            Tcp(port),
-            P2p(self.local_peer_id)
-        ]
+        multiaddr![Ip4([0, 0, 0, 0]), Tcp(port), P2p(self.local_peer_id)]
     }
 
     /// Run the DHT service event loop
@@ -375,10 +371,7 @@ impl DhtService {
     }
 
     /// Handle swarm events
-    async fn handle_swarm_event(
-        &mut self,
-        event: SwarmEvent<OutEvent>,
-    ) {
+    async fn handle_swarm_event(&mut self, event: SwarmEvent<OutEvent>) {
         match event {
             SwarmEvent::Behaviour(OutEvent::Kademlia(kad_event)) => {
                 self.handle_kademlia_event(kad_event).await;
@@ -386,7 +379,9 @@ impl DhtService {
             SwarmEvent::Behaviour(OutEvent::Mdns(mdns_event)) => {
                 self.handle_mdns_event(mdns_event).await;
             }
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 debug!("Connected to peer: {} via {:?}", peer_id, endpoint);
                 self.shared_state.add_connected_peer(peer_id);
 
@@ -402,7 +397,10 @@ impl DhtService {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 debug!("Disconnected from peer: {}", peer_id);
                 self.shared_state.remove_connected_peer(peer_id);
-                let _ = self.event_tx.send(DhtEvent::PeerDisconnected(peer_id)).await;
+                let _ = self
+                    .event_tx
+                    .send(DhtEvent::PeerDisconnected(peer_id))
+                    .await;
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on: {}", address);
@@ -434,10 +432,7 @@ impl DhtService {
                 addresses,
                 ..
             } => {
-                debug!(
-                    "Routing updated for peer: {} (new: {})",
-                    peer, is_new_peer
-                );
+                debug!("Routing updated for peer: {} (new: {})", peer, is_new_peer);
 
                 if is_new_peer {
                     self.shared_state.add_discovered_peer(peer);
@@ -449,48 +444,44 @@ impl DhtService {
                     }
                 }
             }
-            KademliaEvent::OutboundQueryProgressed { result, .. } => {
-                match result {
-                    libp2p::kad::QueryResult::Bootstrap(Ok(_)) => {
-                        debug!("Bootstrap completed successfully");
-                        self.pending_bootstrap = false;
-                        let _ = self.event_tx.send(DhtEvent::BootstrapComplete).await;
-                    }
-                    libp2p::kad::QueryResult::Bootstrap(Err(e)) => {
-                        warn!("Bootstrap failed: {:?}", e);
-                        self.pending_bootstrap = false;
-                    }
-                    libp2p::kad::QueryResult::GetRecord(Ok(result)) => {
-                        match result {
-                            libp2p::kad::GetRecordOk::FoundRecord(peer_record) => {
-                                debug!(
-                                    "Found record: key={:?}, value_len={}",
-                                    peer_record.record.key,
-                                    peer_record.record.value.len()
-                                );
-                                let _ = self
-                                    .event_tx
-                                    .send(DhtEvent::RecordFound {
-                                        key: peer_record.record.key.to_vec(),
-                                        value: peer_record.record.value.to_vec(),
-                                    })
-                                    .await;
-                            }
-                            libp2p::kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. } => {}
-                        }
-                    }
-                    libp2p::kad::QueryResult::GetRecord(Err(e)) => {
-                        warn!("GetRecord failed: {:?}", e);
-                    }
-                    libp2p::kad::QueryResult::PutRecord(Ok(_)) => {
-                        debug!("PutRecord succeeded");
-                    }
-                    libp2p::kad::QueryResult::PutRecord(Err(e)) => {
-                        warn!("PutRecord failed: {:?}", e);
-                    }
-                    _ => {}
+            KademliaEvent::OutboundQueryProgressed { result, .. } => match result {
+                libp2p::kad::QueryResult::Bootstrap(Ok(_)) => {
+                    debug!("Bootstrap completed successfully");
+                    self.pending_bootstrap = false;
+                    let _ = self.event_tx.send(DhtEvent::BootstrapComplete).await;
                 }
-            }
+                libp2p::kad::QueryResult::Bootstrap(Err(e)) => {
+                    warn!("Bootstrap failed: {:?}", e);
+                    self.pending_bootstrap = false;
+                }
+                libp2p::kad::QueryResult::GetRecord(Ok(result)) => match result {
+                    libp2p::kad::GetRecordOk::FoundRecord(peer_record) => {
+                        debug!(
+                            "Found record: key={:?}, value_len={}",
+                            peer_record.record.key,
+                            peer_record.record.value.len()
+                        );
+                        let _ = self
+                            .event_tx
+                            .send(DhtEvent::RecordFound {
+                                key: peer_record.record.key.to_vec(),
+                                value: peer_record.record.value.to_vec(),
+                            })
+                            .await;
+                    }
+                    libp2p::kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. } => {}
+                },
+                libp2p::kad::QueryResult::GetRecord(Err(e)) => {
+                    warn!("GetRecord failed: {:?}", e);
+                }
+                libp2p::kad::QueryResult::PutRecord(Ok(_)) => {
+                    debug!("PutRecord succeeded");
+                }
+                libp2p::kad::QueryResult::PutRecord(Err(e)) => {
+                    warn!("PutRecord failed: {:?}", e);
+                }
+                _ => {}
+            },
             KademliaEvent::UnroutablePeer { peer } => {
                 debug!("Unroutable peer: {}", peer);
             }
@@ -505,10 +496,7 @@ impl DhtService {
                 for (peer, addr) in list {
                     debug!("mDNS discovered peer: {} at {}", peer, addr);
                     self.shared_state.add_discovered_peer(peer);
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer, addr);
+                    self.swarm.behaviour_mut().kademlia.add_address(&peer, addr);
                     let _ = self.event_tx.send(DhtEvent::PeerDiscovered(peer)).await;
                 }
             }
@@ -532,7 +520,10 @@ impl DhtService {
             }
             DhtCommand::RemovePeer { peer_id } => {
                 // Remove all addresses for this peer
-                self.swarm.behaviour_mut().kademlia.remove_address(&peer_id, &Multiaddr::empty());
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .remove_address(&peer_id, &Multiaddr::empty());
             }
             DhtCommand::GetPeers { response_tx } => {
                 let peers = self.shared_state.get_discovered_peers();
@@ -554,27 +545,17 @@ impl DhtService {
                 response_tx,
             } => {
                 let record_key = libp2p::kad::RecordKey::new(&key);
-                let result = self
-                    .swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .put_record(
-                        libp2p::kad::Record::new(record_key, value),
-                        libp2p::kad::Quorum::One,
-                    );
+                let result = self.swarm.behaviour_mut().kademlia.put_record(
+                    libp2p::kad::Record::new(record_key, value),
+                    libp2p::kad::Quorum::One,
+                );
 
                 let success = result.is_ok();
                 let _ = response_tx.send(success);
             }
-            DhtCommand::GetRecord {
-                key,
-                response_tx,
-            } => {
+            DhtCommand::GetRecord { key, response_tx } => {
                 let record_key = libp2p::kad::RecordKey::new(&key);
-                self.swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .get_record(record_key);
+                self.swarm.behaviour_mut().kademlia.get_record(record_key);
                 // Response comes via event
                 let _ = response_tx.send(None);
             }
