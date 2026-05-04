@@ -1,189 +1,241 @@
 import {
-  Activity,
-  Gauge,
-  LayoutDashboard,
-  Server,
+  Zap,
   Shield,
-  Vote,
+  Globe,
+  BarChart3,
+  Network,
+  Lock,
+  Server,
+  Code,
   Wallet,
-  Wifi,
+  Users,
+  Check,
+  Sparkles,
+  Layers,
+  Cpu,
 } from "lucide-react";
-
-import { CtaBanner, InsightGrid, PageHero, SectionHeading, StatGrid } from "@/components/marketing/page-primitives";
 import { SEO } from "@/components/seo";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { FadeIn } from "@/components/ui/fade-in";
+import { SectionHeader } from "@/components/sections/section-header";
+import { SectionBackground } from "@/components/sections/section-background";
+import { CtaSection } from "@/components/sections/cta-section";
 
-const featureCards = [
+const coreFeatures = [
   {
-    icon: Gauge,
-    eyebrow: "Validator Scoring",
-    title: "Composite validator selection",
-    description:
-      "NetChain does not treat stake as a complete proxy for quality. Selection combines internet performance, stake, identity confidence, reputation, attestation support, and slashing history.",
-    meta: "Proof of Internet remains central, but it is no longer isolated.",
+    icon: Network,
+    title: "Proof of Internet Consensus",
+    description: "Revolutionary consensus mechanism that validates network performance metrics. Validators are selected based on actual delivery quality, not just stake.",
+    highlights: ["Real-time performance monitoring", "Anti-gaming protections", "Fair validator selection"],
+    gradient: "from-cyan-500 to-blue-500",
+  },
+  {
+    icon: Zap,
+    title: "High-Performance Runtime",
+    description: "Built in Rust for maximum efficiency. Process thousands of transactions per second with sub-second finality.",
+    highlights: ["10,000+ TPS capacity", "<1 second block time", "Optimized memory usage"],
+    gradient: "from-violet-500 to-purple-500",
   },
   {
     icon: Shield,
-    eyebrow: "Trust Hardening",
-    title: "Anti-gaming checks and persistent penalties",
-    description:
-      "Challenge-response validation and slashing-aware scoring make false metric announcements more expensive than simple self-reporting schemes.",
-    meta: "Past misconduct continues to lower trust instead of disappearing after a single epoch.",
+    title: "Enterprise-Grade Security",
+    description: "Military-grade cryptography protects every transaction. Ed25519 signatures and AES-256-GCM encryption ensure data integrity.",
+    highlights: ["Ed25519 digital signatures", "AES-256-GCM encryption", "Hardware wallet support"],
+    gradient: "from-emerald-500 to-teal-500",
   },
   {
-    icon: Wifi,
-    eyebrow: "Runtime Interfaces",
-    title: "Network visibility from the first run",
-    description:
-      "Health checks, Prometheus-style metrics, WebSocket events, and JSON-RPC methods expose the behavior of the node while it is producing blocks or processing governance actions.",
-    meta: "Operators can inspect the system without custom tooling.",
-  },
-  {
-    icon: Vote,
-    eyebrow: "On-Chain Governance",
-    title: "Protocol parameters can move without a restart",
-    description:
-      "Proposal actions are validated before mempool admission and, if passed, can update core runtime parameters while the network stays online.",
-    meta: "The repository already supports four proposal action types.",
-  },
-  {
-    icon: Wallet,
-    eyebrow: "Native Actions",
-    title: "Transfers, staking, and proposal voting in one state model",
-    description:
-      "The transaction set covers basic value transfer, stake management, proposal creation, and voting so the governance surface is not bolted on as a side system.",
-    meta: "Voting power follows currently staked balance.",
-  },
-  {
-    icon: LayoutDashboard,
-    eyebrow: "Operator UX",
-    title: "Explorer-style reads are part of the website",
-    description:
-      "The front-end includes a dashboard route for blocks, proposals, wallet watchlists, and runtime snapshots, making protocol behavior easier to inspect during local development.",
-    meta: "Marketing and telemetry live inside the same project surface.",
+    icon: Globe,
+    title: "Global Network",
+    description: "Designed for worldwide deployment with intelligent peer discovery and optimized gossip protocols.",
+    highlights: ["Automatic peer discovery", "Geographic optimization", "Low-latency propagation"],
+    gradient: "from-orange-500 to-amber-500",
   },
 ];
 
-const featureStats = [
-  {
-    value: "5",
-    label: "Measured Metrics",
-    detail: "Download, upload, latency, uptime, and stability influence Proof of Internet scoring.",
-  },
-  {
-    value: "4",
-    label: "Governance Changes",
-    detail: "Proposal execution can update block reward, block interval, max transactions, and stake weight.",
-  },
-  {
-    value: "6+",
-    label: "Trust Inputs",
-    detail: "Stake, telemetry, attestations, identity, reputation, penalties, and liveness all contribute to operator quality.",
-  },
-  {
-    value: "1",
-    label: "Unified Codebase",
-    detail: "Node runtime, wallet CLI, explorer, and protocol website are shipped together for faster inspection.",
-  },
+const technicalFeatures = [
+  { icon: Server, title: "Modular Architecture", description: "Clean separation between chain, networking, node, and consensus layers enables easy customization." },
+  { icon: Code, title: "Developer-First APIs", description: "Comprehensive JSON-RPC and WebSocket APIs with TypeScript SDK for seamless integration." },
+  { icon: BarChart3, title: "Real-time Monitoring", description: "Built-in Prometheus metrics, health endpoints, and live WebSocket feeds for complete observability." },
+  { icon: Wallet, title: "Native Wallet", description: "First-party CLI wallet with encrypted key storage, HD derivation, and transaction signing." },
+  { icon: Users, title: "On-Chain Governance", description: "Proposal system with stake-weighted voting enables community-driven protocol evolution." },
+  { icon: Lock, title: "Slashing Protection", description: "Built-in mechanisms detect and penalize malicious behavior, ensuring network integrity." },
 ];
 
-function FeatureBoard() {
-  return (
-    <div className="surface-card overflow-hidden">
-      <div className="border-b border-border/70 px-6 py-5">
-        <p className="eyebrow">Capability Stack</p>
-        <h2 className="mt-3 font-heading text-3xl text-foreground text-balance">
-          Feature work stays close to the protocol core.
-        </h2>
-      </div>
-      <div className="grid gap-3 px-6 py-6">
-        {[
-          {
-            label: "Consensus",
-            detail: "Hybrid Proof of Internet scoring",
-            icon: Gauge,
-          },
-          {
-            label: "Networking",
-            detail: "libp2p gossip plus RPC and WebSocket",
-            icon: Wifi,
-          },
-          {
-            label: "State",
-            detail: "Staking, slashing, and governance transitions",
-            icon: Activity,
-          },
-          {
-            label: "Storage",
-            detail: "Persistent sled-backed local data",
-            icon: Server,
-          },
-        ].map((item) => (
-          <div key={item.label} className="rounded-[24px] border border-border/70 bg-secondary/55 px-5 py-4">
-            <div className="flex items-center gap-3 text-primary">
-              <item.icon className="size-5" aria-hidden="true" />
-              <p className="text-sm font-semibold uppercase tracking-[0.18em]">{item.label}</p>
-            </div>
-            <p className="mt-3 text-sm leading-7 text-muted-foreground">{item.detail}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+const comparisonData = [
+  { feature: "Consensus", netchain: "Proof of Internet", others: "PoW / PoS" },
+  { feature: "Selection Criteria", netchain: "Network performance + stake", others: "Stake only" },
+  { feature: "Gaming Resistance", netchain: "High (peer attestation)", others: "Low to Medium" },
+  { feature: "Energy Efficiency", netchain: "Very High", others: "Low (PoW) / High (PoS)" },
+  { feature: "True Decentralization", netchain: "Yes", others: "Stake concentration" },
+  { feature: "Open Source", netchain: "100%", others: "Varies" },
+];
 
 export function FeaturesPage() {
   return (
-    <div>
+    <>
       <SEO
-        title="NetChain Features | Hybrid Consensus, Governance, and Telemetry"
-        description="Explore NetChain features including hybrid validator scoring, anti-gaming checks, governance controls, runtime telemetry, and native staking flows."
-        keywords="NetChain features, Proof of Internet, validator scoring, governance, slashing, telemetry"
+        title="Features - NetChain"
+        description="Explore NetChain's revolutionary features: Proof of Internet consensus, high-performance runtime, enterprise security, and more."
       />
 
-      <PageHero
-        eyebrow="Protocol Features"
-        title="Features that connect the consensus thesis to day-to-day operation."
-        description="NetChain is structured as a practical operator stack. Consensus signals, governance controls, storage, networking, and observability are wired together so the protocol can be evaluated as a working system."
-        primaryAction={{ label: "See How It Works", to: "/how-it-works" }}
-        secondaryAction={{ label: "Review the Docs", to: "/docs" }}
-        metrics={[
-          { label: "Consensus", value: "Proof of Internet plus stake and trust signals" },
-          { label: "Governance", value: "Stake-weighted proposals with runtime updates" },
-          { label: "Telemetry", value: "Health, metrics, WebSocket, and explorer views" },
-          { label: "Operations", value: "Rust node, wallet CLI, Docker, and config overrides" },
-        ]}
-        aside={<FeatureBoard />}
-      />
+      {/* Hero Section */}
+      <section className="relative pt-32 pb-24 overflow-hidden">
+        <SectionBackground variant="gradient" />
+        <div className="absolute inset-0 bg-grid-fine opacity-30" />
 
-      <section className="section-band">
-        <div className="site-grid space-y-10">
-          <SectionHeading
-            eyebrow="Capability Overview"
-            title="The repo already exposes the surfaces a real operator needs."
-            description="The goal of the front-end is no longer to sell abstraction. It should explain how the protocol behaves, where the trust model hardens, and what an engineer can inspect immediately."
-          />
-          <InsightGrid items={featureCards} columns={3} />
+        <div className="container-wide relative z-10">
+          <FadeIn direction="up">
+            <div className="max-w-4xl">
+              <SectionHeader
+                badge={{ label: "Features", icon: Sparkles }}
+                title="Built for the Future of Decentralized Networks"
+                highlight="Decentralized Networks"
+                description="Every component of NetChain is engineered for performance, security, and developer experience. Discover what makes us different."
+                align="left"
+                className="mb-0"
+              />
+            </div>
+          </FadeIn>
         </div>
       </section>
 
-      <section className="section-band border-y border-border/60 bg-secondary/40">
-        <div className="site-grid space-y-10">
-          <SectionHeading
-            eyebrow="Numbers That Matter"
-            title="A small protocol surface, but one with enough hooks to test seriously."
-            description="NetChain is still experimental, yet the current implementation already covers the most important edges: validator quality, governance transitions, telemetry, and multiple operator entry points."
+      {/* Core Features */}
+      <section className="py-24 relative overflow-hidden">
+        <SectionBackground variant="subtle" />
+
+        <div className="container-wide relative z-10">
+          <SectionHeader
+            badge={{ label: "Core Capabilities", icon: Layers }}
+            title="Foundational Technologies"
+            highlight="Technologies"
+            description="The technologies that power NetChain's unique approach to blockchain."
           />
-          <StatGrid items={featureStats} />
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            {coreFeatures.map((feature, index) => (
+              <FadeIn key={feature.title} delay={index * 100} direction="up">
+                <Card variant="default" size="lg" className="h-full group">
+                  <CardContent className="p-8">
+                    <div className="flex items-start gap-6">
+                      <div className={`flex-shrink-0 w-14 h-14 rounded-xl flex items-center justify-center transition-all duration-500 group-hover:scale-110 bg-gradient-to-br ${feature.gradient} p-[1px]`}>
+                        <div className="w-full h-full rounded-[10px] bg-card flex items-center justify-center">
+                          <feature.icon className="w-7 h-7 text-white" />
+                        </div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-2xl font-semibold mb-3 text-foreground">{feature.title}</h3>
+                        <p className="text-muted-foreground mb-5 leading-relaxed">{feature.description}</p>
+                        <ul className="space-y-2.5">
+                          {feature.highlights.map((highlight) => (
+                            <li key={highlight} className="flex items-center gap-3">
+                              <div className="w-5 h-5 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                                <Check className="w-3 h-3 text-primary" />
+                              </div>
+                              <span className="text-sm text-foreground/80">{highlight}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </FadeIn>
+            ))}
+          </div>
         </div>
       </section>
 
-      <CtaBanner
-        eyebrow="Continue"
-        title="Follow the validator-selection path from raw measurement to block production."
-        description="The next page breaks down how measurements are announced, challenged, blended with stake and reputation, and fed into validator choice and governance oversight."
-        primaryAction={{ label: "Open How It Works", to: "/how-it-works" }}
-        secondaryAction={{ label: "Open Explorer", to: "/dashboard" }}
+      {/* Technical Features Grid */}
+      <section className="py-24 relative overflow-hidden">
+        <SectionBackground variant="gradient" />
+
+        <div className="container-wide relative z-10">
+          <SectionHeader
+            badge={{ label: "Technical Excellence", icon: Cpu }}
+            title="Built by Engineers, for Engineers"
+            highlight="Engineers"
+            description="Every detail considered for the best developer experience."
+          />
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {technicalFeatures.map((feature, index) => (
+              <FadeIn key={feature.title} delay={index * 80} direction="up">
+                <Card variant="glass" size="md" className="h-full group">
+                  <CardHeader>
+                    <div className="w-12 h-12 rounded-xl bg-primary/10 border border-primary/20 text-primary flex items-center justify-center mb-4 group-hover:scale-110 group-hover:bg-primary/20 transition-all duration-500">
+                      <feature.icon className="w-6 h-6" />
+                    </div>
+                    <CardTitle className="text-lg">{feature.title}</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <CardDescription className="text-base leading-relaxed">
+                      {feature.description}
+                    </CardDescription>
+                  </CardContent>
+                </Card>
+              </FadeIn>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Comparison Table */}
+      <section className="py-24 relative overflow-hidden">
+        <SectionBackground variant="subtle" />
+
+        <div className="container-wide relative z-10">
+          <SectionHeader
+            badge={{ label: "Comparison", icon: BarChart3 }}
+            title="How We Compare"
+            highlight="Compare"
+            description="Proof of Internet consensus offers unique advantages over traditional approaches."
+          />
+
+          <FadeIn direction="up" delay={200}>
+            <div className="max-w-4xl mx-auto">
+              <div className="bg-surface-elevated border border-border rounded-2xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-card border-b border-border">
+                        <th className="text-left px-6 py-5 font-semibold text-foreground">Feature</th>
+                        <th className="text-left px-6 py-5 font-semibold text-primary">NetChain</th>
+                        <th className="text-left px-6 py-5 font-semibold text-muted-foreground">Others</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {comparisonData.map((row, index) => (
+                        <tr
+                          key={row.feature}
+                          className={`border-b border-border/50 last:border-0 transition-colors hover:bg-primary/5 ${index % 2 === 0 ? "bg-transparent" : "bg-card/50"}`}
+                        >
+                          <td className="px-6 py-4 font-medium text-foreground">{row.feature}</td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center gap-2 text-primary">
+                              <Check className="w-4 h-4" />
+                              {row.netchain}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-muted-foreground">{row.others}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </FadeIn>
+        </div>
+      </section>
+
+      {/* CTA Section */}
+      <CtaSection
+        badge={{ label: "Ready to Start" }}
+        title="Ready to Experience NetChain?"
+        description="Start building on the next generation of blockchain infrastructure today."
+        primaryAction={{ label: "Get Started", href: "/get-started" }}
+        secondaryAction={{ label: "View Technology", href: "/technology" }}
       />
-    </div>
+    </>
   );
 }

@@ -38,6 +38,7 @@ impl Blockchain {
             "0".to_string(),
             "genesis".to_string(),
             ts,
+            String::new(), // genesis has no VRF proof
         )
     }
 
@@ -80,13 +81,14 @@ impl Blockchain {
             return Err("Invalid timestamp: before unix epoch".into());
         }
 
-        // Verify the block hash
+        // Verify the block hash (includes VRF proof in the hash)
         let recalculated = Block::calculate_hash(
             block.index,
             &block.timestamp,
             &block.merkle_root,
             &block.previous_hash,
             &block.validator,
+            &block.vrf_proof,
         );
 
         if block.hash != recalculated {
@@ -98,11 +100,33 @@ impl Blockchain {
             return Err("Invalid merkle root: does not match transactions".into());
         }
 
+        // Verify VRF proof (validator's signature on previous block hash)
+        if !block.verify_vrf_proof() {
+            return Err("Invalid VRF proof: validator signature verification failed".into());
+        }
+
         // Verify all transaction signatures
         for tx in &block.transactions {
             if let Err(e) = tx.verify() {
                 return Err(format!("Block contains invalid transaction: {}", e));
             }
+        }
+
+        // Enforce maximum block size (serialized transactions)
+        let config = bincode::config::standard()
+            .with_fixed_int_encoding()
+            .with_little_endian();
+        let tx_total_bytes: usize = block
+            .transactions
+            .iter()
+            .map(|tx| bincode::serde::encode_to_vec(tx, config).unwrap_or_default().len())
+            .sum();
+        if tx_total_bytes > crate::mempool::MAX_BLOCK_SIZE_BYTES {
+            return Err(format!(
+                "Block too large: {} bytes exceeds maximum {} bytes",
+                tx_total_bytes,
+                crate::mempool::MAX_BLOCK_SIZE_BYTES
+            ));
         }
 
         Ok(())
@@ -134,6 +158,7 @@ impl Blockchain {
                 &current.merkle_root,
                 &current.previous_hash,
                 &current.validator,
+                &current.vrf_proof,
             );
 
             if current.hash != recalculated {
@@ -361,6 +386,7 @@ impl Blockchain {
                 &block.merkle_root,
                 &block.previous_hash,
                 &block.validator,
+                &block.vrf_proof,
             );
 
             if block.hash != recalculated {

@@ -153,6 +153,7 @@ export interface UseNetChainResult {
   lookupBlock: (index: number) => Promise<BlockDetails | null>;
   lookupProposal: (proposalId: number) => Promise<ProposalInfo | null>;
   lookupAccount: (address: string) => Promise<NetChainWalletView>;
+  requestTokens: (address: string) => Promise<string>;
   clearSelections: () => void;
 }
 
@@ -350,6 +351,20 @@ export function useNetChain(): UseNetChainResult {
       };
       setWalletView(nextView);
       return nextView;
+    } catch (error) {
+      const message = toErrorMessage(error);
+      setRpcError(message);
+      throw new Error(message);
+    }
+  }
+
+  async function requestTokens(address: string) {
+    if (!address) {
+      throw new Error("Address cannot be empty");
+    }
+
+    try {
+      return await client.requestTokens(address);
     } catch (error) {
       const message = toErrorMessage(error);
       setRpcError(message);
@@ -579,6 +594,7 @@ export function useNetChain(): UseNetChainResult {
     lookupBlock,
     lookupProposal,
     lookupAccount,
+    requestTokens,
     clearSelections,
   };
 }

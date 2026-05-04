@@ -13,8 +13,14 @@ pub mod blockchain;
 pub mod config;
 #[path = "poi/consensus.rs"]
 pub mod consensus;
+#[path = "net/dht.rs"]
+pub mod dht;
+#[path = "poi/epoch_manager.rs"]
+pub mod epoch_manager;
 #[path = "poi/measurement.rs"]
 pub mod measurement;
+#[path = "poi/metric_challenge.rs"]
+pub mod metric_challenge;
 #[path = "node/mempool.rs"]
 pub mod mempool;
 #[path = "poi/metrics_aggregator.rs"]

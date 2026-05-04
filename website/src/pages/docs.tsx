@@ -1,169 +1,456 @@
-import { Activity, Blocks, Globe, Terminal, Wallet, Wifi } from "lucide-react";
+import { Link } from "react-router-dom";
+import {
+  Activity,
+  ArrowRight,
+  Blocks,
+  BookOpen,
+  Code,
+  Copy,
+  CheckCircle2,
+  FileCode,
+  Globe,
+  Server,
+  Terminal,
+  Wallet,
+  Wifi,
+  Zap,
+} from "lucide-react";
+import { useState } from "react";
 
-import { CommandGrid, CtaBanner, InsightGrid, PageHero, SectionHeading } from "@/components/marketing/page-primitives";
 import { SEO } from "@/components/seo";
+import { FadeIn } from "@/components/ui/fade-in";
+import { SectionHeader } from "@/components/sections/section-header";
+import { SectionBackground } from "@/components/sections/section-background";
+import { CtaSection } from "@/components/sections/cta-section";
 
-const commandCards = [
+const commandSections = [
   {
-    label: "Build and Check",
-    command: `cargo build
-cargo check --all-targets
-cargo fmt --all -- --check`,
-    description:
-      "Use the standard Rust workflow to build the binaries, type-check the repository, and verify formatting before making or reviewing changes.",
+    title: "Build & Check",
+    icon: Code,
+    commands: [
+      { cmd: "cargo build", desc: "Compile debug binaries" },
+      { cmd: "cargo build --release", desc: "Compile optimized release binaries" },
+      { cmd: "cargo check --all-targets", desc: "Type-check without building" },
+      { cmd: "cargo fmt --all -- --check", desc: "Verify code formatting" },
+    ],
   },
   {
-    label: "Run the Node",
-    command: `cargo run --bin netchain
-NETCHAIN_CONFIG=./config/default.toml cargo run --bin netchain`,
-    description:
-      "Start the node with the default configuration or provide an explicit config path through the environment to test runtime variants.",
+    title: "Run",
+    icon: Zap,
+    commands: [
+      { cmd: "cargo run --bin netchain", desc: "Start the blockchain node" },
+      { cmd: "cargo run --bin netchain-wallet", desc: "Launch the wallet CLI" },
+      { cmd: "NETCHAIN_CONFIG=./config/default.toml cargo run --bin netchain", desc: "Run with explicit config" },
+    ],
   },
   {
-    label: "Run the Wallet",
-    command: `cargo run --bin netchain-wallet`,
-    description:
-      "The first-party CLI wallet is shipped alongside the node and is the simplest way to interact with signing and local key management flows.",
-  },
-  {
-    label: "Run the Test Suite",
-    command: `cargo test --all-targets
-cargo test test_empty_merkle_root
-cargo test -- --exact test_name`,
-    description:
-      "The repository supports full-suite execution as well as narrower test targeting for individual behaviors or exact test names.",
+    title: "Test",
+    icon: Terminal,
+    commands: [
+      { cmd: "cargo test --all-targets", desc: "Run full test suite" },
+      { cmd: "cargo test test_empty_merkle_root", desc: "Run specific test by name" },
+      { cmd: "cargo test -- --exact test_name", desc: "Exact match test name" },
+    ],
   },
 ];
 
-const interfaceCards = [
+const interfaces = [
   {
     icon: Globe,
-    eyebrow: "JSON-RPC",
-    title: "Local application reads and writes",
-    description:
-      "The default RPC server listens on `127.0.0.1:8545` and exposes account, balance, block, mempool, proposal, and transaction endpoints.",
-    meta: "Key methods include `get_balance`, `send_transaction`, `get_block`, `get_proposals`, and `get_chain_info`.",
+    name: "JSON-RPC",
+    port: "8545",
+    description: "Query balances, submit transactions, fetch blocks and chain info",
+    methods: ["get_balance", "send_transaction", "get_block", "get_chain_info"],
+    color: "primary",
   },
   {
     icon: Wifi,
-    eyebrow: "WebSocket",
-    title: "Event streaming for live clients",
-    description:
-      "The WebSocket service runs on `127.0.0.1:8546` and supports topic subscriptions for new blocks, transactions, proposals, and slashing activity.",
-    meta: "Subscriptions use JSON messages such as `{\"action\":\"subscribe\",\"topics\":[\"new_blocks\"]}`.",
+    name: "WebSocket",
+    port: "8546",
+    description: "Subscribe to real-time events for blocks, transactions, and proposals",
+    methods: ["new_blocks", "new_transactions", "proposals", "slashing"],
+    color: "accent",
   },
   {
     icon: Activity,
-    eyebrow: "Monitoring",
-    title: "Health and metrics endpoints",
-    description:
-      "The monitoring service listens on `127.0.0.1:9090` and exposes `GET /health` for JSON status and `GET /metrics` for Prometheus-style output.",
-    meta: "The monitoring surface includes consensus mode, validator counts, and aggregate trust signals.",
-  },
-  {
-    icon: Blocks,
-    eyebrow: "Transactions",
-    title: "Native protocol actions",
-    description:
-      "Transfer, stake, unstake, proposal creation, and proposal voting are first-class transaction types inside the chain state model.",
-    meta: "Governance is not bolted on outside the execution layer.",
-  },
-  {
-    icon: Wallet,
-    eyebrow: "Configuration",
-    title: "TOML plus environment overrides",
-    description:
-      "The node loads `config/default.toml` by default and supports overrides such as `DATA_DIR`, `RPC_PORT`, `NETCHAIN_BLOCK_INTERVAL_SECS`, and `NETCHAIN_LOG_LEVEL`.",
-    meta: "That keeps local runs explicit while still making deployments scriptable.",
-  },
-  {
-    icon: Terminal,
-    eyebrow: "Deployment",
-    title: "Docker and local Rust workflows",
-    description:
-      "Developers can build and run the project directly with Cargo or use Docker Compose for a containerized local environment.",
-    meta: "The compose surface exposes P2P, RPC, and monitoring ports.",
+    name: "Monitoring",
+    port: "9090",
+    description: "Health checks and Prometheus-compatible metrics endpoint",
+    methods: ["/health", "/metrics"],
+    color: "tertiary",
   },
 ];
 
-function DocsBoard() {
+const quickLinks = [
+  {
+    icon: FileCode,
+    title: "Architecture",
+    description: "Understand the modular design and PoI consensus",
+    href: "/technology",
+  },
+  {
+    icon: Blocks,
+    title: "Features",
+    description: "Explore core capabilities and protocol features",
+    href: "/features",
+  },
+  {
+    icon: Server,
+    title: "Explorer",
+    description: "Inspect live chain state in the dashboard",
+    href: "/dashboard",
+  },
+];
+
+function CommandBlock({ cmd, desc }: { cmd: string; desc: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(cmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
-    <div className="surface-card overflow-hidden">
-      <div className="border-b border-border/70 px-6 py-5">
-        <p className="eyebrow">Reference Surface</p>
-        <h2 className="mt-3 font-heading text-3xl text-foreground text-balance">
-          Everything needed for a serious local evaluation.
-        </h2>
+    <div className="group flex w-full min-w-0 flex-col gap-3 rounded-xl border border-border bg-code-bg px-4 py-3 transition-all duration-300 hover:border-primary/30 hover:bg-surface-hover sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 flex-1 items-start gap-3 overflow-hidden">
+        <span className="mt-0.5 shrink-0 text-primary/70">$</span>
+        <code className="block min-w-0 break-all font-mono text-[0.8125rem] leading-6 text-foreground/80 sm:truncate sm:text-sm sm:leading-5 sm:whitespace-nowrap">
+          {cmd}
+        </code>
       </div>
-      <div className="grid gap-3 px-6 py-6">
-        {[
-          "Node binary: `netchain`",
-          "Wallet binary: `netchain-wallet`",
-          "JSON-RPC: `127.0.0.1:8545`",
-          "WebSocket: `127.0.0.1:8546`",
-          "Monitoring: `127.0.0.1:9090`",
-        ].map((item) => (
-          <div key={item} className="rounded-[24px] border border-border/70 bg-secondary/55 px-5 py-4">
-            <p className="font-mono text-sm text-foreground">{item}</p>
-          </div>
-        ))}
+      <div className="flex items-center gap-3 self-end sm:self-auto">
+        <span className="hidden max-w-[12rem] truncate text-xs text-muted-foreground sm:block">
+          {desc}
+        </span>
+        <button
+          onClick={handleCopy}
+          className="shrink-0 rounded-lg p-2 text-muted-foreground opacity-100 transition-all hover:bg-foreground/10 hover:text-primary sm:opacity-0 sm:group-hover:opacity-100"
+          aria-label="Copy command"
+        >
+          {copied ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-tertiary" />
+          ) : (
+            <Copy className="h-3.5 w-3.5" />
+          )}
+        </button>
       </div>
     </div>
   );
 }
 
+function InterfaceCard({
+  icon: Icon,
+  name,
+  port,
+  description,
+  methods,
+  color,
+  index,
+}: {
+  icon: typeof Globe;
+  name: string;
+  port: string;
+  description: string;
+  methods: string[];
+  color: string;
+  index: number;
+}) {
+  const colorClasses: Record<string, string> = {
+    primary: "from-primary/20 to-primary/5 text-primary border-primary/30",
+    accent: "from-accent/20 to-accent/5 text-accent border-accent/30",
+    tertiary: "from-tertiary/20 to-tertiary/5 text-tertiary border-tertiary/30",
+  };
+
+  const iconBg: Record<string, string> = {
+    primary: "bg-gradient-to-br from-primary/20 to-primary/5 text-primary",
+    accent: "bg-gradient-to-br from-accent/20 to-accent/5 text-accent",
+    tertiary: "bg-gradient-to-br from-tertiary/20 to-tertiary/5 text-tertiary",
+  };
+
+  return (
+    <FadeIn delay={index * 0.1}>
+      <div className="group relative overflow-hidden rounded-xl border border-border bg-card p-6 transition-all duration-500 hover:border-primary/30 hover:bg-surface-hover">
+        <div className={`absolute inset-0 bg-gradient-to-br ${colorClasses[color]} opacity-0 transition-opacity duration-500 group-hover:opacity-100`} />
+
+        <div className="relative">
+          <div className="mb-5 flex items-start justify-between">
+            <div className={`flex h-12 w-12 items-center justify-center rounded-xl ${iconBg[color]} transition-transform duration-300 group-hover:scale-110`}>
+              <Icon className="h-6 w-6" />
+            </div>
+            <code className="rounded-lg bg-code-bg px-3 py-1.5 font-mono text-xs text-muted-foreground">
+              :{port}
+            </code>
+          </div>
+          <h3 className="mb-2 text-lg font-semibold text-foreground">{name}</h3>
+          <p className="mb-5 text-sm text-muted-foreground">{description}</p>
+          <div className="flex flex-wrap gap-2">
+            {methods.map((method) => (
+              <span
+                key={method}
+                className="rounded-full bg-secondary/50 px-3 py-1 font-mono text-xs text-muted-foreground transition-colors group-hover:bg-secondary group-hover:text-foreground/80"
+              >
+                {method}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </FadeIn>
+  );
+}
+
 export function DocsPage() {
   return (
-    <div>
+    <div className="relative min-h-screen">
       <SEO
-        title="NetChain Docs | Build, Run, and Inspect the Protocol"
-        description="Use the NetChain documentation surface to build the node, run the wallet, inspect RPC and WebSocket interfaces, and work with monitoring endpoints."
-        keywords="NetChain docs, cargo run netchain, wallet CLI, JSON-RPC, WebSocket, monitoring"
+        title="Documentation | NetChain"
+        description="Developer documentation for NetChain. Build, run, and interact with the blockchain node using JSON-RPC, WebSocket, and monitoring interfaces."
+        keywords="NetChain docs, blockchain documentation, JSON-RPC, WebSocket, cargo commands"
       />
 
-      <PageHero
-        eyebrow="Developer Documentation"
-        title="Commands, interfaces, and runtime surfaces in one reference path."
-        description="The repository is small enough to inspect directly but broad enough to need structure. This page collects the build, run, interface, and deployment entry points that matter when evaluating NetChain locally."
-        primaryAction={{ label: "Get Started", to: "/get-started" }}
-        secondaryAction={{ label: "Read the Technology", to: "/technology" }}
-        metrics={[
-          { label: "Build", value: "Cargo-based Rust workflow" },
-          { label: "Inspect", value: "RPC, WebSocket, health, and metrics endpoints" },
-          { label: "Operate", value: "Config file plus environment overrides" },
-          { label: "Contribute", value: "CI checks include fmt, check, and test targets" },
-        ]}
-        aside={<DocsBoard />}
-      />
+      {/* Hero Section */}
+      <section className="relative overflow-hidden pt-32 pb-20">
+        <SectionBackground variant="gradient" />
+        <div className="absolute inset-0 bg-grid-fine opacity-30" />
 
-      <section className="section-band">
-        <div className="site-grid space-y-10">
-          <SectionHeading
-            eyebrow="Core Commands"
-            title="The build and local run workflow is intentionally direct."
-            description="There is no complicated bootstrap path here. Cargo commands cover build, test, and runtime entry, while the wallet CLI and explorer route provide two immediate ways to interact with the node."
-          />
-          <CommandGrid items={commandCards} />
+        <div className="container-wide relative z-10">
+          <FadeIn className="mx-auto max-w-3xl text-center">
+            <SectionHeader
+              badge={{ label: "Developer Documentation", icon: BookOpen }}
+              title="Build and run NetChain"
+              highlight="NetChain"
+              description="Everything you need to build the node, interact with the network, and monitor protocol activity. Simple Cargo commands, explicit interfaces, no magic."
+            />
+          </FadeIn>
+
+          {/* Quick Reference Card */}
+          <FadeIn delay={0.2} className="mx-auto mt-12 max-w-2xl">
+            <div className="rounded-xl border border-border bg-card p-6">
+              <div className="mb-5 flex items-center gap-2 text-sm text-muted-foreground">
+                <Terminal className="h-4 w-4 text-primary" />
+                <span>Quick Reference</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {[
+                  { label: "Node binary", value: "netchain" },
+                  { label: "Wallet binary", value: "netchain-wallet" },
+                  { label: "JSON-RPC", value: "127.0.0.1:8545" },
+                  { label: "WebSocket", value: "127.0.0.1:8546" },
+                ].map((item) => (
+                  <div
+                    key={item.label}
+                    className="flex flex-col items-start gap-1 rounded-xl bg-code-bg px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <span className="text-sm text-muted-foreground">{item.label}</span>
+                    <code className="max-w-full break-all font-mono text-sm text-primary">
+                      {item.value}
+                    </code>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </FadeIn>
         </div>
       </section>
 
-      <section className="section-band border-y border-border/60 bg-secondary/40">
-        <div className="site-grid space-y-10">
-          <SectionHeading
-            eyebrow="Interface Reference"
-            title="Protocol access points are explicit and easy to wire into tooling."
-            description="Local RPC methods, streaming events, monitoring reads, and governance-aware transaction types give developers multiple ways to inspect or automate the runtime."
-          />
-          <InsightGrid items={interfaceCards} columns={3} />
+      {/* Commands Section */}
+      <section className="relative py-20">
+        <SectionBackground variant="subtle" />
+
+        <div className="container-wide relative z-10">
+          <FadeIn className="mb-12">
+            <SectionHeader
+              badge={{ label: "Commands", icon: Code }}
+              title="Standard Cargo workflow"
+              highlight="Cargo"
+              description="No custom build tools or scripts. The repository follows conventional Rust patterns for building, testing, and running the node."
+              align="left"
+              className="mb-0"
+            />
+          </FadeIn>
+
+          <div className="grid gap-8 lg:grid-cols-3">
+            {commandSections.map((section, sectionIndex) => (
+              <FadeIn key={section.title} delay={sectionIndex * 0.1}>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 border border-primary/20 text-primary">
+                      <section.icon className="h-5 w-5" />
+                    </div>
+                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      {section.title}
+                    </h3>
+                  </div>
+                  <div className="space-y-2">
+                    {section.commands.map((cmd) => (
+                      <CommandBlock key={cmd.cmd} cmd={cmd.cmd} desc={cmd.desc} />
+                    ))}
+                  </div>
+                </div>
+              </FadeIn>
+            ))}
+          </div>
         </div>
       </section>
 
-      <CtaBanner
-        eyebrow="Start Running"
-        title="Use the local bring-up path and inspect the protocol while it is live."
-        description="The get-started page turns the docs into an operational checklist: build the binaries, start the node, open the explorer, and verify the interfaces end to end."
-        primaryAction={{ label: "Open Get Started", to: "/get-started" }}
-        secondaryAction={{ label: "Open Explorer", to: "/dashboard" }}
+      {/* Interfaces Section */}
+      <section className="relative py-20">
+        <SectionBackground variant="gradient" />
+
+        <div className="container-wide relative z-10">
+          <FadeIn className="mb-12">
+            <SectionHeader
+              badge={{ label: "Interfaces", icon: Server }}
+              title="Protocol access points"
+              highlight="Access"
+              description="The node exposes three primary interfaces. All bind to localhost by default, configurable via TOML or environment variables."
+              align="left"
+              className="mb-0"
+            />
+          </FadeIn>
+
+          <div className="grid gap-6 md:grid-cols-3">
+            {interfaces.map((iface, index) => (
+              <InterfaceCard key={iface.name} {...iface} index={index} />
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Configuration Section */}
+      <section className="relative py-20">
+        <SectionBackground variant="subtle" />
+
+        <div className="container-wide relative z-10">
+          <div className="grid gap-12 lg:grid-cols-2">
+            <FadeIn>
+              <SectionHeader
+                badge={{ label: "Configuration", icon: Wallet }}
+                title="TOML config with environment overrides"
+                highlight="Config"
+                description=""
+                align="left"
+                className="mb-0"
+              />
+              <p className="mt-4 text-muted-foreground">
+                The node loads <code className="text-primary bg-primary/10 px-1.5 py-0.5 rounded font-mono text-xs">config/default.toml</code> by
+                default. Every setting can be overridden via environment variables, making
+                deployments scriptable while keeping local development explicit.
+              </p>
+
+              <div className="mt-8 space-y-4">
+                <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-foreground">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary" />
+                  Key Environment Variables
+                </h3>
+                <div className="space-y-2">
+                  {[
+                    { name: "DATA_DIR", desc: "Node data directory" },
+                    { name: "RPC_PORT", desc: "JSON-RPC bind port" },
+                    { name: "NETCHAIN_WS_PORT", desc: "WebSocket bind port" },
+                    { name: "NETCHAIN_BLOCK_INTERVAL_SECS", desc: "Block production interval" },
+                    { name: "NETCHAIN_LOG_LEVEL", desc: "Logging verbosity" },
+                  ].map((env) => (
+                    <div
+                      key={env.name}
+                      className="flex flex-col items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-all duration-300 hover:border-primary/30 hover:bg-surface-hover sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <code className="max-w-full break-all font-mono text-sm text-primary">
+                        {env.name}
+                      </code>
+                      <span className="text-sm text-muted-foreground sm:text-right">
+                        {env.desc}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </FadeIn>
+
+            <FadeIn delay={0.2}>
+              <div className="rounded-xl border border-border bg-card p-6">
+                <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+                  <FileCode className="h-4 w-4 text-primary" />
+                  <span>config/default.toml</span>
+                </div>
+
+                <div className="overflow-hidden rounded-xl border border-border bg-code-bg">
+                  <div className="flex items-center gap-2 border-b border-border bg-surface-elevated px-4 py-2">
+                    <div className="h-3 w-3 rounded-full bg-red-500/60" />
+                    <div className="h-3 w-3 rounded-full bg-yellow-500/60" />
+                    <div className="h-3 w-3 rounded-full bg-green-500/60" />
+                  </div>
+
+                  <pre className="overflow-x-auto p-4 text-sm">
+                    <code className="text-foreground/70">
+{`# Network configuration
+[network]
+p2p_port = 9000
+rpc_port = 8545
+ws_port = 8546
+monitoring_port = 9090
+
+# Consensus settings
+[consensus]
+block_interval_secs = 10
+max_validators = 100
+
+# Storage
+[storage]
+data_dir = "./data"
+
+# Logging
+log_level = "info"`}
+                    </code>
+                  </pre>
+                </div>
+              </div>
+            </FadeIn>
+          </div>
+        </div>
+      </section>
+
+      {/* Quick Links Section */}
+      <section className="relative py-20">
+        <div className="container-wide">
+          <FadeIn className="mb-12 text-center">
+            <h2 className="text-2xl font-bold text-foreground">Continue exploring</h2>
+            <p className="mt-2 text-muted-foreground">
+              Dive deeper into architecture, features, or start exploring live data
+            </p>
+          </FadeIn>
+
+          <div className="mx-auto grid max-w-3xl gap-4 md:grid-cols-3">
+            {quickLinks.map((link, index) => (
+              <FadeIn key={link.title} delay={index * 0.1}>
+                <Link
+                  to={link.href}
+                  className="group flex flex-col rounded-xl border border-border bg-card p-6 transition-all duration-300 hover:border-primary/40 hover:bg-surface-hover hover:shadow-lg hover:shadow-primary/5"
+                >
+                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 border border-primary/20 text-primary transition-all duration-300 group-hover:scale-110 group-hover:bg-primary/20">
+                    <link.icon className="h-6 w-6" />
+                  </div>
+                  <h3 className="mb-1 font-semibold text-foreground group-hover:text-primary transition-colors">{link.title}</h3>
+                  <p className="mb-4 flex-1 text-sm text-muted-foreground">{link.description}</p>
+                  <div className="flex items-center gap-1 text-sm text-primary">
+                    <span>Learn more</span>
+                    <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-1" />
+                  </div>
+                </Link>
+              </FadeIn>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA Section */}
+      <CtaSection
+        badge={{ label: "Ready" }}
+        title="Ready to run the node?"
+        description="Follow the quickstart guide to build the binaries, launch the node, and start exploring the protocol in minutes."
+        primaryAction={{ label: "Get Started", href: "/get-started" }}
+        secondaryAction={{ label: "Open Explorer", href: "/dashboard" }}
       />
     </div>
   );

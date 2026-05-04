@@ -60,3 +60,37 @@ max_latency_ms = 10000.0
 invalid_block_penalty_bps = 1000   # 10% of stake
 metric_fraud_penalty_bps = 500     # 5% of stake
 missed_block_penalty_bps = 100     # 1% of stake
+
+# DHT / Peer Discovery configuration
+[dht]
+enabled = true
+dht_port = 30333
+enable_mdns = true
+bootstrap_interval_secs = 30
+protocol_name = "/netchain/kad/1.0.0"
+
+# Bootstrap nodes for initial peer discovery
+[[dht.bootstrap_nodes]]
+peer_id = "12D3KooWRxEPF5f8qXqf3Z5qXqf3Z5qXqf3Z5qXqf3Z5qXqf3Z5"
+multiaddr = "/ip4/0.0.0.0/tcp/30333"
+name = "NetChain Bootstrap 1"
+
+# Epoch Manager configuration
+[epoch]
+blocks_per_epoch = 100
+history_epochs = 10
+min_attestations_for_validator = 3
+max_active_validators = 100
+reputation_decay = 0.95
+missed_epoch_slash_bps = 500
+top_performer_bonus_bps = 200
+top_performer_count = 10
+
+# Metric Challenge configuration
+[metric_challenge]
+default_challenge_bytes = 5000000
+challenge_timeout_secs = 60
+min_challenge_interval_secs = 300
+max_concurrent_challenges = 3
+min_challenges_for_attestation = 2
+auto_challenge_enabled = true

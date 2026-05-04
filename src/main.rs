@@ -4,16 +4,20 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::time::{interval, sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use netchain::anti_gaming::{self, AntiGamingService};
 use netchain::block::Block;
 use netchain::blockchain::Blockchain;
 use netchain::config::AppConfig;
+use netchain::dht::{DhtService, DhtConfig, DhtEvent};
+use netchain::epoch_manager::{EpochConfig, EpochManager};
 use netchain::measurement::MeasurementService;
 use netchain::mempool::Mempool;
+use netchain::metric_challenge::MetricChallengeService;
 use netchain::metrics_aggregator::{Attestation, MetricsAggregator};
 use netchain::monitoring::{start_monitoring_server, MonitoringState};
 use netchain::p2p::{NetworkMessage, P2PEvent, P2PService};
@@ -251,6 +255,10 @@ async fn main() -> Result<()> {
     let local_peer_id = p2p_handle.local_peer_id().to_string();
     info!(peer_id = %local_peer_id, "local peer id initialized");
 
+    // Clone for various tasks
+    let _local_id_metrics = local_peer_id.clone();
+    let local_id_challenge = local_peer_id.clone();
+
     // Initialize block producer with PoI consensus
     let producer_config = ProducerConfig {
         max_txs_per_block: config.producer.max_txs_per_block,
@@ -296,6 +304,33 @@ async fn main() -> Result<()> {
         .await;
     info!("metrics aggregator initialized");
 
+    // Epoch manager for validator rotation and rewards
+    let epoch_config = EpochConfig {
+        blocks_per_epoch: config.epoch.blocks_per_epoch,
+        history_epochs: config.epoch.history_epochs,
+        min_attestations_for_validator: config.epoch.min_attestations_for_validator,
+        max_active_validators: config.epoch.max_active_validators,
+        reputation_decay: config.epoch.reputation_decay,
+        missed_epoch_slash_bps: config.epoch.missed_epoch_slash_bps,
+        top_performer_bonus_bps: config.epoch.top_performer_bonus_bps,
+        top_performer_count: config.epoch.top_performer_count,
+    };
+    let epoch_manager = Arc::new(EpochManager::new(
+        epoch_config,
+        vec![local_peer_id.clone()],
+    ));
+    info!("epoch manager initialized");
+
+    // Metric challenge service for P2P bandwidth verification
+    let challenge_config = config.metric_challenge.clone();
+    let challenge_signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let metric_challenge = Arc::new(MetricChallengeService::new(
+        challenge_config,
+        challenge_signing_key,
+        local_peer_id.clone(),
+    ));
+    info!("metric challenge service initialized");
+
     // Anti-gaming service for validation and rate limiting
     let anti_gaming_config = config.anti_gaming.clone();
     let anti_gaming = Arc::new(Mutex::new(AntiGamingService::new(anti_gaming_config)));
@@ -310,6 +345,56 @@ async fn main() -> Result<()> {
     });
 
     info!(p2p_port = port, "node ready and waiting for p2p events");
+
+    // ===== Initialize DHT for peer discovery =====
+    let dht_config = DhtConfig {
+        bootstrap_nodes: config.dht.bootstrap_nodes.clone(),
+        dht_port: config.dht.dht_port,
+        enabled: config.dht.enabled,
+        bootstrap_interval_secs: config.dht.bootstrap_interval_secs,
+        enable_mdns: config.dht.enable_mdns,
+        protocol_name: config.dht.protocol_name.clone(),
+    };
+
+    let (dht_event_tx, mut dht_event_rx) = mpsc::channel(100);
+
+    let dht_handle = if dht_config.enabled {
+        // Generate identity for DHT (could reuse p2p key in production)
+        let dht_key = libp2p::identity::Keypair::generate_ed25519();
+
+        match DhtService::new(dht_config.clone(), &dht_key, dht_event_tx).await {
+            Ok((mut dht_service, dht_command_tx)) => {
+                info!(
+                    peer_id = %dht_service.local_peer_id(),
+                    port = dht_config.dht_port,
+                    "DHT service initialized"
+                );
+
+                // Register DHT peer address in metric challenge service
+                let dht_addr = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+                    dht_config.dht_port,
+                );
+                metric_challenge
+                    .register_peer_address(local_peer_id.clone(), dht_addr)
+                    .await;
+
+                // Spawn DHT task
+                tokio::spawn(async move {
+                    dht_service.run().await;
+                });
+
+                Some(dht_command_tx)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to initialize DHT service");
+                None
+            }
+        }
+    } else {
+        info!("DHT peer discovery disabled");
+        None
+    };
 
     // Start RPC server for wallet CLI
     let rpc_state = Arc::new(RpcState {
@@ -518,6 +603,16 @@ async fn main() -> Result<()> {
                     timestamp: new_block.timestamp.to_rfc3339(),
                 });
 
+                // Record block production in epoch manager
+                epoch_manager
+                    .record_block_production(
+                        &local_peer_id,
+                        block_height,
+                        txs.len(),
+                        (block_interval_secs as f64) * 1000.0,
+                    )
+                    .await;
+
                 // Check for epoch boundary
                 {
                     let mut agg = aggregator_epoch.lock().await;
@@ -534,6 +629,103 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // ===== Automatic Metric Challenge Task =====
+    // Periodically challenges unverified peers to verify their metrics
+    let challenge_service = metric_challenge.clone();
+    let challenge_p2p = p2p_handle.clone();
+    let challenge_aggregator = metrics_aggregator.clone();
+    let challenge_config_clone = config.metric_challenge.clone();
+    let challenge_local_id = local_id_challenge;
+
+    if challenge_config_clone.auto_challenge_enabled {
+        tokio::spawn(async move {
+            let mut challenge_interval = interval(Duration::from_secs(60));
+
+            loop {
+                challenge_interval.tick().await;
+
+                // Get unverified nodes that need challenges
+                let unverified = {
+                    let agg = challenge_aggregator.lock().await;
+                    agg.get_unverified_nodes()
+                };
+
+                for node_id in unverified {
+                    if node_id == challenge_local_id {
+                        continue; // Don't challenge ourselves
+                    }
+
+                    if challenge_service.can_challenge_peer(&node_id).await {
+                        if let Some(challenge) = challenge_service.create_challenge(node_id.clone()).await {
+                            info!(
+                                target = challenge.target_id,
+                                nonce = challenge.challenge_nonce,
+                                "initiating metric challenge"
+                            );
+                            
+                            // Send challenge via P2P
+                            challenge_p2p.send_metric_challenge(
+                                challenge.target_id.clone(),
+                                challenge.challenge_nonce.clone(),
+                                challenge.bytes_to_download,
+                            );
+                        }
+                    }
+                }
+                
+                // Cleanup expired challenges
+                let cleaned = challenge_service.cleanup_expired_challenges().await;
+                if cleaned > 0 {
+                    debug!(cleaned, "cleaned up expired challenges");
+                }
+            }
+        });
+    }
+
+    // ===== DHT Event Handler =====
+    // Handle peer discovery events from DHT
+    if let Some(_dht_command_tx) = dht_handle {
+        let _dht_metric_challenge = metric_challenge.clone();
+        let dht_aggregator = metrics_aggregator.clone();
+        let _dht_producer = producer.clone();
+        let _dht_state = state.clone();
+        let dht_p2p = p2p_handle.clone();
+        
+        tokio::spawn(async move {
+            while let Some(dht_event) = dht_event_rx.recv().await {
+                match dht_event {
+                    DhtEvent::PeerDiscovered(peer_id) => {
+                        info!(peer_id = %peer_id, "DHT discovered new peer");
+                        // Register peer in aggregator for potential attestation
+                        {
+                            let mut agg = dht_aggregator.lock().await;
+                            agg.register_node(peer_id.to_string());
+                        }
+                    }
+                    DhtEvent::PeerConnected(peer_id) => {
+                        info!(peer_id = %peer_id, "DHT connected to peer");
+                        // Request metric verification for new peer
+                        let nonce = format!("{:x}", rand::random::<u64>());
+                        dht_p2p.send_metric_challenge(
+                            peer_id.to_string(),
+                            nonce,
+                            1_000_000, // 1 MB initial challenge
+                        );
+                    }
+                    DhtEvent::PeerDisconnected(peer_id) => {
+                        info!(peer_id = %peer_id, "DHT peer disconnected");
+                    }
+                    DhtEvent::BootstrapComplete => {
+                        info!("DHT bootstrap completed");
+                    }
+                    DhtEvent::RecordFound { key, value } => {
+                        debug!(key_len = key.len(), value_len = value.len(), "DHT record found");
+                    }
+                }
+            }
+        });
+    }
 
     // Main event loop
     let storage_main = storage.clone();
@@ -1335,7 +1527,7 @@ mod tests {
         let addr = pubkey_to_address_hex(&kp.verifying_key());
 
         let base_time = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
-        let genesis = Block::new_at(0, vec![], "0".to_string(), "genesis".to_string(), base_time);
+        let genesis = Block::new_at(0, vec![], "0".to_string(), "genesis".to_string(), base_time, String::new());
 
         let reward_block_1 = Block::new_at(
             1,
@@ -1343,6 +1535,7 @@ mod tests {
             genesis.hash.clone(),
             addr.clone(),
             base_time + chrono::Duration::seconds(1),
+            String::new(),
         );
         let reward_block_2 = Block::new_at(
             2,
@@ -1350,6 +1543,7 @@ mod tests {
             reward_block_1.hash.clone(),
             addr.clone(),
             base_time + chrono::Duration::seconds(2),
+            String::new(),
         );
         let reward_block_3 = Block::new_at(
             3,
@@ -1357,6 +1551,7 @@ mod tests {
             reward_block_2.hash.clone(),
             addr.clone(),
             base_time + chrono::Duration::seconds(3),
+            String::new(),
         );
 
         let stake_tx =
@@ -1384,6 +1579,7 @@ mod tests {
             reward_block_3.hash.clone(),
             addr.clone(),
             base_time + chrono::Duration::seconds(4),
+            String::new(),
         );
         let block2 = Block::new_at(
             5,
@@ -1391,6 +1587,7 @@ mod tests {
             block1.hash.clone(),
             addr.clone(),
             base_time + chrono::Duration::seconds(7),
+            String::new(),
         );
 
         let rebuilt = rebuild_state_from_chain(&[
@@ -1415,6 +1612,7 @@ mod tests {
             "genesis".to_string(),
             "validator".to_string(),
             base_time,
+            String::new(),
         );
         let valid_json = serde_json::to_string(&block).unwrap();
         let invalid_json = "{not valid json}".to_string();

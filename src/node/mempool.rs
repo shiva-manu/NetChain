@@ -27,6 +27,10 @@ pub struct Mempool {
     inserted_at: HashMap<String, u64>,
 }
 
+/// Maximum serialized block size in bytes (1 MB default).
+/// This prevents oversized blocks from being produced or accepted.
+pub const MAX_BLOCK_SIZE_BYTES: usize = 1024 * 1024;
+
 impl Mempool {
     /// Create empty mempool
     pub fn new() -> Self {
@@ -130,15 +134,32 @@ impl Mempool {
     /// - Highest-fee first (deterministic tie-breakers)
     /// - Enforces per-sender nonce ordering
     /// - Only selects transactions that are valid against the provided `state`
+    /// - Enforces a maximum serialized block size to prevent DoS
     pub fn select_for_block(
         &self,
         max_txs: usize,
         state: &State,
         now: u64,
+        max_block_size_bytes: usize,
     ) -> Vec<SignedTransaction> {
         if max_txs == 0 || self.txs.is_empty() {
             return Vec::new();
         }
+
+        // Pre-compute serialized sizes for all transactions (cheap one-time cost).
+        let config = bincode::config::standard()
+            .with_fixed_int_encoding()
+            .with_little_endian();
+        let tx_sizes: HashMap<String, usize> = self
+            .txs
+            .iter()
+            .map(|(hash, tx)| {
+                let size = bincode::serde::encode_to_vec(tx, config)
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX);
+                (hash.clone(), size)
+            })
+            .collect();
 
         // Work on a clone so we can simulate sequential execution without mutating the real state.
         let mut working_state = state.clone();
@@ -150,6 +171,7 @@ impl Mempool {
         senders.sort();
 
         let mut selected = Vec::new();
+        let mut current_size: usize = 0;
 
         while selected.len() < max_txs {
             // Best candidate among currently-valid sender heads: (sender, tx_hash, fee)
@@ -230,7 +252,15 @@ impl Mempool {
                 continue;
             }
 
+            // Check if adding this tx would exceed the block size limit.
+            let tx_size = tx_sizes.get(&best_hash).copied().unwrap_or(usize::MAX);
+            if current_size + tx_size > max_block_size_bytes {
+                // Block size limit reached. Stop selecting more transactions.
+                break;
+            }
+
             selected.push(tx.clone());
+            current_size += tx_size;
 
             // Consume the head we just used.
             if let Some(queue) = sender_queues.get_mut(&best_sender) {

@@ -18,11 +18,10 @@ export const REPOSITORY_URL = "https://github.com/shiva-manu/NetChain";
 
 export const siteNavigation: SiteNavItem[] = [
   { label: "Features", to: "/features" },
-  { label: "How It Works", to: "/how-it-works" },
   { label: "Technology", to: "/technology" },
-  { label: "Governance", to: "/governance" },
   { label: "Docs", to: "/docs" },
-  { label: "Get Started", to: "/get-started" },
+  { label: "Faucet", to: "/faucet" },
+  { label: "Explorer", to: "/dashboard" },
 ];
 
 export const footerGroups: FooterGroup[] = [
@@ -32,7 +31,7 @@ export const footerGroups: FooterGroup[] = [
       { label: "Homepage", to: "/" },
       { label: "Features", to: "/features" },
       { label: "Technology", to: "/technology" },
-      { label: "Governance", to: "/governance" },
+      { label: "Faucet", to: "/faucet" },
     ],
   },
   {

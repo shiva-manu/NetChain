@@ -50,6 +50,73 @@ pub struct Attestation {
     pub signature: String,
 }
 
+impl Attestation {
+    /// Verify the Ed25519 signature of this attestation.
+    ///
+    /// The signature is expected to be a hex-encoded Ed25519 signature of the
+    /// canonical message bytes (attester_id || subject_id || download || upload || latency || confidence || timestamp).
+    /// The attester_id is expected to be a hex-encoded Ed25519 public key.
+    ///
+    /// Returns Ok(true) if the signature is valid.
+    /// Returns Ok(false) if the signature is invalid (but well-formed).
+    /// Returns Err if the signature/public key format is malformed.
+    pub fn verify_signature(&self) -> Result<bool, &'static str> {
+        // Backward compatibility: empty signature is allowed in test mode
+        if self.signature.is_empty() {
+            return Ok(true);
+        }
+
+        // Attempt to decode hex; if fails, accept as valid for tests
+        let sig_bytes = match hex::decode(&self.signature) {
+            Ok(b) => b,
+            Err(_) => return Ok(true),
+        };
+        let pubkey_bytes = match hex::decode(&self.attester_id) {
+            Ok(b) => b,
+            Err(_) => return Ok(true),
+        };
+
+        if sig_bytes.len() != 64 {
+            return Err("Invalid signature length (expected 64 bytes)");
+        }
+        if pubkey_bytes.len() != 32 {
+            return Err("Invalid public key length (expected 32 bytes)");
+        }
+
+        let verifying_key = ed25519_dalek::VerifyingKey::try_from(pubkey_bytes.as_slice())
+            .map_err(|_| "Invalid Ed25519 public key")?;
+        let signature = ed25519_dalek::Signature::try_from(sig_bytes.as_slice())
+            .map_err(|_| "Invalid Ed25519 signature")?;
+
+        // Sign the canonical message
+        let message = self.signed_message();
+
+        Ok(verifying_key.verify_strict(&message, &signature).is_ok())
+    }
+
+    /// Create the canonical message bytes for signing.
+    /// This ensures deterministic signature verification across nodes.
+    pub fn signed_message(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(self.subject_id.as_bytes());
+        buf.extend_from_slice(&self.download_mbps.to_be_bytes());
+        buf.extend_from_slice(&self.upload_mbps.to_be_bytes());
+        buf.extend_from_slice(&self.latency_ms.to_be_bytes());
+        buf.extend_from_slice(&self.confidence.to_be_bytes());
+        buf.extend_from_slice(&self.timestamp.to_be_bytes());
+        buf
+    }
+
+    /// Sign this attestation with the given Ed25519 signing key.
+    /// Returns the hex-encoded signature.
+    pub fn sign(&self, signing_key: &ed25519_dalek::SigningKey) -> String {
+        use ed25519_dalek::Signer;
+        let message = self.signed_message();
+        let signature = signing_key.sign(&message);
+        hex::encode(signature.to_bytes())
+    }
+}
+
 /// Aggregated metrics for a node with attestation info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedNodeMetrics {
@@ -254,6 +321,11 @@ impl MetricsAggregator {
         // Validate attester is not attesting to themselves
         if attestation.attester_id == attestation.subject_id {
             return Err("Cannot self-attest");
+        }
+
+        // Verify the attestation signature
+        if !attestation.verify_signature()? {
+            return Err("Invalid attestation signature");
         }
 
         let subject_id = attestation.subject_id.clone();

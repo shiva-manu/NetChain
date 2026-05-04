@@ -143,6 +143,15 @@ export class NetChainClient {
 
     return response.json();
   }
+
+  async requestTokens(address: string): Promise<string> {
+    if (!address) {
+      throw new Error("Invalid address");
+    }
+
+    const result = await this.request<{ tx_hash: string }>("faucet_tokens", { address });
+    return result.tx_hash;
+  }
 }
 
 export { DEFAULT_MONITORING_URL, DEFAULT_RPC_URL };

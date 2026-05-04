@@ -156,6 +156,34 @@ impl PoiScorer {
         Self { config }
     }
 
+    /// Compute a VRF-enhanced seed using a validator's signature on the previous block hash.
+    /// This makes validator selection unpredictable until the block is published,
+    /// preventing targeted DDoS attacks against the selected validator.
+    ///
+    /// The `vrf_proof` is the validator's Ed25519 signature of the previous block hash.
+    /// All nodes can verify by checking it's a valid signature of the known block hash.
+    pub fn compute_vrf_seed(
+        previous_hash: &str,
+        height: u64,
+        validator_pubkey: &str,
+        vrf_proof: &[u8],
+    ) -> u128 {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        // Layer 1: base seed from block hash and height
+        hasher.update(previous_hash.as_bytes());
+        hasher.update(height.to_be_bytes());
+        // Layer 2: VRF proof (validator's signature on block hash)
+        hasher.update(vrf_proof);
+        // Layer 3: validator identity (prevents Sybil attacks on selection)
+        hasher.update(validator_pubkey.as_bytes());
+        let result = hasher.finalize();
+
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&result[0..16]);
+        u128::from_be_bytes(bytes)
+    }
+
     pub fn set_stake_weight(&mut self, stake_weight: f64) {
         self.config.stake_weight = stake_weight.clamp(0.0, 1.0);
     }

@@ -1,173 +1,134 @@
 import { useEffect, useState } from "react";
-import { ArrowUpRight, Github, LayoutDashboard, Menu, X } from "lucide-react";
-import { Link, NavLink, type NavLinkRenderProps } from "react-router-dom";
-
-import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { REPOSITORY_URL, siteNavigation } from "@/content/site";
+import { Link, useLocation } from "react-router-dom";
+import { Menu, Blocks, ExternalLink } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { Sheet, SheetContent, SheetTrigger, SheetClose } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-function navLinkClassName({ isActive }: NavLinkRenderProps) {
-  return cn(
-    "rounded-full px-4 py-2 text-sm font-semibold transition-colors",
-    isActive
-      ? "bg-secondary text-foreground"
-      : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground",
-  );
-}
-
-function BrandMark() {
-  return (
-    <div className="relative flex size-11 items-center justify-center rounded-2xl border border-border/80 bg-card shadow-[0_18px_40px_-24px_rgba(15,23,42,0.35)]">
-      <div
-        className="absolute inset-1 rounded-xl border border-primary/18 bg-[radial-gradient(circle_at_top,_color-mix(in_oklab,var(--accent)_28%,transparent),_transparent_62%)]"
-        aria-hidden="true"
-      />
-      <div className="relative grid grid-cols-2 gap-1">
-        <span className="size-2.5 rounded-full bg-primary" />
-        <span className="size-2.5 rounded-full bg-accent" />
-        <span className="size-2.5 rounded-full bg-foreground/18" />
-        <span className="size-2.5 rounded-full bg-primary/35" />
-      </div>
-    </div>
-  );
-}
+const navLinks = [
+  { href: "/features", label: "Features" },
+  { href: "/technology", label: "Technology" },
+  { href: "/docs", label: "Docs" },
+  { href: "/faucet", label: "Faucet" },
+  { href: "/dashboard", label: "Explorer" },
+];
 
 export function Navbar() {
-  const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const location = useLocation();
 
   useEffect(() => {
-    const handleScroll = () => {
-      setScrolled(window.scrollY > 12);
-    };
-
-    handleScroll();
-    window.addEventListener("scroll", handleScroll, { passive: true });
-
-    return () => {
-      window.removeEventListener("scroll", handleScroll);
-    };
+    const handler = () => setScrolled(window.scrollY > 10);
+    window.addEventListener("scroll", handler, { passive: true });
+    return () => window.removeEventListener("scroll", handler);
   }, []);
 
   return (
     <header
       className={cn(
-        "sticky top-0 z-50 border-b border-transparent transition-colors",
-        (open || scrolled) &&
-          "border-border/70 bg-background/88 backdrop-blur-xl supports-[backdrop-filter]:bg-background/78",
+        "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
+        scrolled
+          ? "border-b border-border/40 bg-background/80 backdrop-blur-md"
+          : "bg-transparent"
       )}
     >
-      <nav className="container-site flex h-20 items-center justify-between gap-6" aria-label="Primary navigation">
-        <Link to="/" className="flex items-center gap-4" aria-label="NetChain home">
-          <BrandMark />
-          <div className="min-w-0">
-            <p className="font-heading text-2xl leading-none text-foreground">NetChain</p>
-            <p className="mt-1 text-[0.7rem] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-              Proof of Internet
-            </p>
+      <nav className="container-wide flex items-center justify-between h-16">
+        {/* Logo */}
+        <Link to="/" className="flex items-center gap-2.5 group">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground">
+            <Blocks className="w-4 h-4" />
           </div>
+          <span className="font-semibold text-lg tracking-tight text-foreground">
+            NetChain
+          </span>
         </Link>
 
-        <div className="hidden items-center gap-1 lg:flex">
-          {siteNavigation.map((item) => (
-            <NavLink key={item.to} to={item.to} className={navLinkClassName}>
-              {item.label}
-            </NavLink>
+        {/* Desktop nav */}
+        <div className="hidden md:flex items-center gap-1">
+          {navLinks.map((link) => (
+            <Link
+              key={link.href}
+              to={link.href}
+              className={cn(
+                "relative px-3.5 py-2 text-sm font-medium transition-colors rounded-lg",
+                location.pathname === link.href
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {link.label}
+              {location.pathname === link.href && (
+                <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-4 h-0.5 bg-primary rounded-full" />
+              )}
+            </Link>
           ))}
         </div>
 
-        <div className="hidden items-center gap-3 lg:flex">
-          <a
-            href={REPOSITORY_URL}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="inline-flex items-center gap-2 rounded-full border border-border bg-card/90 px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-card"
-          >
-            <Github className="size-4" aria-hidden="true" />
-            GitHub
-            <ArrowUpRight className="size-4" aria-hidden="true" />
-          </a>
-          <NavLink
-            to="/dashboard"
-            className={({ isActive }) =>
-              cn(
-                "inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors",
-                isActive
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90",
-              )
-            }
-          >
-            <LayoutDashboard className="size-4" aria-hidden="true" />
-            Explorer
-          </NavLink>
+        {/* Desktop actions */}
+        <div className="hidden md:flex items-center gap-2">
+          <ThemeToggle />
+          <Button variant="terminal" size="sm" href="/get-started">
+            Get Started
+          </Button>
+          <Button variant="default" size="sm" href="/dashboard">
+            Dashboard
+            <ExternalLink className="w-3.5 h-3.5 ml-1" />
+          </Button>
         </div>
 
-        <div className="flex items-center lg:hidden">
-          <Sheet open={open} onOpenChange={setOpen}>
+        {/* Mobile menu */}
+        <div className="flex md:hidden items-center gap-2">
+          <ThemeToggle />
+          <Sheet>
             <SheetTrigger
-              className="inline-flex size-11 items-center justify-center rounded-full border border-border bg-card text-foreground transition-colors hover:bg-secondary"
-              aria-label={open ? "Close navigation menu" : "Open navigation menu"}
+              className="inline-flex items-center justify-center rounded-lg h-10 w-10 hover:bg-muted transition-colors"
+              aria-label="Open menu"
             >
-              {open ? <X className="size-5" aria-hidden="true" /> : <Menu className="size-5" aria-hidden="true" />}
+              <Menu className="w-5 h-5" />
             </SheetTrigger>
-            <SheetContent
-              side="right"
-              className="w-[min(26rem,100vw)] overscroll-contain border-border bg-background/96 px-6 pt-6 backdrop-blur-2xl"
-            >
-              <SheetTitle className="sr-only">Navigation</SheetTitle>
-              <div className="flex items-center gap-4">
-                <BrandMark />
-                <div>
-                  <p className="font-heading text-2xl text-foreground">NetChain</p>
-                  <p className="mt-1 text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-                    Proof of Internet
-                  </p>
-                </div>
-              </div>
-
-              <div className="story-rule my-6" aria-hidden="true" />
-
-              <div className="flex flex-col gap-2">
-                {siteNavigation.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    onClick={() => setOpen(false)}
-                    className={({ isActive }) =>
-                      cn(
-                        "rounded-2xl border px-4 py-3 text-base font-semibold transition-colors",
-                        isActive
-                          ? "border-primary/20 bg-secondary text-foreground"
-                          : "border-border/70 bg-card/90 text-foreground hover:bg-secondary/80",
-                      )
+            <SheetContent side="right" className="w-72">
+              <div className="flex flex-col gap-1 mt-8">
+                {navLinks.map((link) => (
+                  <SheetClose
+                    key={link.href}
+                    render={
+                      <Link
+                        to={link.href}
+                        className={cn(
+                          "px-4 py-3 text-sm font-medium transition-colors rounded-lg",
+                          location.pathname === link.href
+                            ? "text-primary bg-primary/10"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                        )}
+                      />
                     }
                   >
-                    {item.label}
-                  </NavLink>
+                    {link.label}
+                  </SheetClose>
                 ))}
-              </div>
-
-              <div className="story-rule my-6" aria-hidden="true" />
-
-              <div className="grid gap-3">
-                <NavLink
-                  to="/dashboard"
-                  onClick={() => setOpen(false)}
-                  className="inline-flex items-center justify-between rounded-2xl bg-primary px-4 py-3 text-base font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
-                >
-                  Explorer
-                  <LayoutDashboard className="size-4" aria-hidden="true" />
-                </NavLink>
-                <a
-                  href={REPOSITORY_URL}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="inline-flex items-center justify-between rounded-2xl border border-border bg-card/90 px-4 py-3 text-base font-semibold text-foreground transition-colors hover:bg-card"
-                >
-                  GitHub Repository
-                  <ArrowUpRight className="size-4" aria-hidden="true" />
-                </a>
+                <div className="flex flex-col gap-3 pt-4 mt-4 border-t border-border">
+                  <SheetClose
+                    render={
+                      <Link
+                        to="/get-started"
+                        className="inline-flex items-center justify-center gap-2 h-10 px-5 text-sm font-medium rounded-lg border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+                      />
+                    }
+                  >
+                    Get Started
+                  </SheetClose>
+                  <SheetClose
+                    render={
+                      <Link
+                        to="/dashboard"
+                        className="inline-flex items-center justify-center gap-2 h-10 px-5 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:brightness-110 transition-colors"
+                      />
+                    }
+                  >
+                    Dashboard
+                  </SheetClose>
+                </div>
               </div>
             </SheetContent>
           </Sheet>

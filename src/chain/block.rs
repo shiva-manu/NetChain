@@ -17,6 +17,9 @@ pub struct Block {
     pub transactions: Vec<SignedTransaction>,
     /// Validator/producer address that created this block.
     pub validator: String,
+    /// VRF proof: validator's Ed25519 signature of the previous block hash (hex-encoded).
+    /// This makes validator selection unpredictable until the block is published.
+    pub vrf_proof: String,
     pub previous_hash: String,
     pub hash: String,
 }
@@ -29,29 +32,47 @@ impl Block {
         previous_hash: String,
         validator: String,
     ) -> Self {
-        Self::new_at(index, transactions, previous_hash, validator, Utc::now())
+        Self::new_at(
+            index,
+            transactions,
+            previous_hash,
+            validator,
+            Utc::now(),
+            String::new(),
+        )
     }
 
     /// Create a new block at a specific timestamp.
     ///
     /// This is useful for deterministic block processing where transaction validation
     /// must use the same "now" as the block timestamp.
+    ///
+    /// The `vrf_proof` is the validator's Ed25519 signature of the previous block hash,
+    /// used to make validator selection unpredictable (VRF-enhanced consensus).
     pub fn new_at(
         index: u64,
         transactions: Vec<SignedTransaction>,
         previous_hash: String,
         validator: String,
         timestamp: DateTime<Utc>,
+        vrf_proof: String,
     ) -> Self {
         let merkle_root = compute_merkle_root(&transactions);
-        let hash =
-            Self::calculate_hash(index, &timestamp, &merkle_root, &previous_hash, &validator);
+        let hash = Self::calculate_hash(
+            index,
+            &timestamp,
+            &merkle_root,
+            &previous_hash,
+            &validator,
+            &vrf_proof,
+        );
         Self {
             index,
             timestamp,
             merkle_root,
             transactions,
             validator,
+            vrf_proof,
             previous_hash,
             hash,
         }
@@ -64,6 +85,7 @@ impl Block {
         merkle_root: &str,
         previous_hash: &str,
         validator: &str,
+        vrf_proof: &str,
     ) -> String {
         let payload = serde_json::json!({
             "index": index,
@@ -71,6 +93,7 @@ impl Block {
             "merkle_root": merkle_root,
             "previous_hash": previous_hash,
             "validator": validator,
+            "vrf_proof": vrf_proof,
         })
         .to_string();
 
@@ -83,6 +106,39 @@ impl Block {
     pub fn verify_merkle_root(&self) -> bool {
         let computed = compute_merkle_root(&self.transactions);
         computed == self.merkle_root
+    }
+
+    /// Verify the VRF proof: check that the validator signed the previous block hash.
+    /// Returns true if the proof is valid or if VRF is not enabled (empty proof).
+    pub fn verify_vrf_proof(&self) -> bool {
+        if self.vrf_proof.is_empty() {
+            return true; // Backward compatibility: blocks without VRF proof are valid
+        }
+
+        let proof_bytes = match hex::decode(&self.vrf_proof) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        let pubkey_bytes = match hex::decode(&self.validator) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        let verifying_key =
+            match ed25519_dalek::VerifyingKey::try_from(pubkey_bytes.as_slice()) {
+                Ok(k) => k,
+                Err(_) => return false,
+            };
+
+        let signature = match ed25519_dalek::Signature::try_from(proof_bytes.as_slice()) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        verifying_key
+            .verify_strict(&self.previous_hash.as_bytes(), &signature)
+            .is_ok()
     }
 }
 
@@ -194,12 +250,13 @@ mod tests {
     fn test_block_hash_determinism() {
         // Two blocks with same params at same timestamp should have same hash
         let ts = Utc::now();
-        let h1 = Block::calculate_hash(1, &ts, "merkle", "prev", "val");
-        let h2 = Block::calculate_hash(1, &ts, "merkle", "prev", "val");
+        let vrf_proof = String::new();
+        let h1 = Block::calculate_hash(1, &ts, "merkle", "prev", "val", &vrf_proof);
+        let h2 = Block::calculate_hash(1, &ts, "merkle", "prev", "val", &vrf_proof);
         assert_eq!(h1, h2);
 
         // Changing any field changes the hash
-        let h3 = Block::calculate_hash(2, &ts, "merkle", "prev", "val");
+        let h3 = Block::calculate_hash(2, &ts, "merkle", "prev", "val", &vrf_proof);
         assert_ne!(h1, h3);
     }
 }

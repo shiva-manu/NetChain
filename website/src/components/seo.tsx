@@ -64,7 +64,7 @@ export function SEO({
 
     upsertMeta({ attribute: "name", key: "description", content: seo.description });
     upsertMeta({ attribute: "name", key: "keywords", content: seo.keywords });
-    upsertMeta({ attribute: "name", key: "theme-color", content: "#f5f2ea" });
+    upsertMeta({ attribute: "name", key: "theme-color", content: "#0f0f11" });
 
     upsertMeta({ attribute: "property", key: "og:type", content: "website" });
     upsertMeta({ attribute: "property", key: "og:title", content: seo.title });

@@ -48,6 +48,7 @@ aes-gcm = "0.10"
 # Encoding
 hex = "0.4"
 base64 = "0.22"
+bs58 = "0.5"
 bincode = { version = "2.0", features = ["serde"] }
 zeroize = "1.8"
 
@@ -81,6 +82,7 @@ libp2p = { version = "0.56", features = [
     "noise",
     "yamux",
     "gossipsub",
+    "kad",
     "macros"
 ] }
 

@@ -4,7 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::anti_gaming::AntiGamingConfig;
+use crate::dht::DhtConfig;
+use crate::epoch_manager::EpochConfig;
 use crate::measurement::MeasurementConfig;
+use crate::metric_challenge::MetricChallengeConfig;
 use crate::metrics_aggregator::AggregatorConfig;
 use crate::state::SlashingConfig;
 
@@ -20,6 +23,9 @@ pub struct AppConfig {
     pub aggregator: AggregatorConfig,
     pub anti_gaming: AntiGamingConfig,
     pub slashing: SlashingConfig,
+    pub dht: DhtConfig,
+    pub epoch: EpochConfig,
+    pub metric_challenge: MetricChallengeConfig,
 }
 
 impl Default for AppConfig {
@@ -34,6 +40,9 @@ impl Default for AppConfig {
             aggregator: AggregatorConfig::default(),
             anti_gaming: AntiGamingConfig::default(),
             slashing: SlashingConfig::default(),
+            dht: DhtConfig::default(),
+            epoch: EpochConfig::default(),
+            metric_challenge: MetricChallengeConfig::default(),
         }
     }
 }

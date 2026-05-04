@@ -46,6 +46,9 @@ pub struct BlockProducer {
     poi_scorer: PoiScorer,
     /// Known validators and their metrics
     validator_pool: HashMap<String, NodeMetrics>,
+    /// This validator's Ed25519 signing key for VRF proofs.
+    /// If None, blocks are produced without VRF proof (backward compatible).
+    signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl BlockProducer {
@@ -56,6 +59,7 @@ impl BlockProducer {
             config,
             poi_scorer: PoiScorer::new(poi_config),
             validator_pool: HashMap::new(),
+            signing_key: None,
         }
     }
 
@@ -67,7 +71,21 @@ impl BlockProducer {
             config,
             poi_scorer: PoiScorer::new(poi_config),
             validator_pool: HashMap::new(),
+            signing_key: None,
         }
+    }
+
+    /// Set the signing key for VRF proof generation.
+    /// This enables unpredictable validator selection.
+    pub fn set_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
+        self.signing_key = Some(key);
+    }
+
+    /// Get the validator's public key (if signing key is set)
+    pub fn get_public_key_hex(&self) -> Option<String> {
+        self.signing_key
+            .as_ref()
+            .map(|k| hex::encode(k.verifying_key().to_bytes()))
     }
 
     /// Align attestation normalization with the aggregator's quorum threshold.
@@ -175,6 +193,42 @@ impl BlockProducer {
         ))
     }
 
+    /// Select the validator for the next block using a VRF-enhanced seed.
+    /// The VRF proof makes selection unpredictable until the block is published.
+    pub fn select_validator_vrf(
+        &self,
+        previous_hash: &str,
+        height: u64,
+        stakes: &HashMap<String, u64>,
+        vrf_proof_hex: &str,
+    ) -> Option<String> {
+        if self.validator_pool.is_empty() {
+            return None;
+        }
+
+        // Use the validator's own VRF proof as part of the seed.
+        // Each validator computes this independently; only the selected validator's
+        // proof will produce a consistent seed across all nodes.
+        let pubkey_hex = self
+            .signing_key
+            .as_ref()
+            .map(|k| hex::encode(k.verifying_key().to_bytes()))
+            .unwrap_or_default();
+
+        let seed = PoiScorer::compute_vrf_seed(
+            previous_hash,
+            height,
+            &pubkey_hex,
+            vrf_proof_hex.as_bytes(),
+        );
+
+        Some(self.poi_scorer.select_validator_with_seed_and_stakes(
+            &self.validator_pool,
+            seed,
+            stakes,
+        ))
+    }
+
     /// Check if this node is the selected validator for the next block
     pub fn is_my_turn(
         &self,
@@ -229,19 +283,37 @@ impl BlockProducer {
         // Keep producer stake-weight in sync with on-chain governance params.
         self.poi_scorer.set_stake_weight(chain_params.stake_weight);
 
-        // Check if it's our turn to produce
-        if !self.is_my_turn(&last_block.hash, next_height, &stakes) {
+        // Generate VRF proof: sign the previous block hash to create an unpredictable seed.
+        // This must be done BEFORE checking if it's our turn, so the seed is deterministic.
+        let vrf_proof_hex = if let Some(ref key) = self.signing_key {
+            use ed25519_dalek::Signer;
+            let signature = key.sign(last_block.hash.as_bytes());
+            hex::encode(signature.to_bytes())
+        } else {
+            String::new()
+        };
+
+        // Check if it's our turn to produce (using VRF-enhanced seed if available)
+        let selected = if !vrf_proof_hex.is_empty() {
+            self.select_validator_vrf(&last_block.hash, next_height, &stakes, &vrf_proof_hex)
+        } else {
+            self.select_validator(&last_block.hash, next_height, &stakes)
+        };
+
+        if selected.as_ref() != Some(&self.config.node_id) {
             return None;
         }
 
         // Select transactions from mempool (use configured max from chain params).
-        // Selection validates sequential execution at `block_time_secs`.
+        // Selection validates sequential execution at `block_time_secs` and enforces
+        // a maximum serialized block size to prevent DoS.
         let state_snapshot = state_guard.clone();
         let mempool_guard = mempool.lock().await;
         let selected_txs = mempool_guard.select_for_block(
             chain_params.max_txs_per_block,
             &state_snapshot,
             block_time_secs,
+            crate::mempool::MAX_BLOCK_SIZE_BYTES,
         );
         drop(mempool_guard);
 
@@ -252,6 +324,7 @@ impl BlockProducer {
             last_block.hash.clone(),
             self.config.node_id.clone(),
             block_time,
+            vrf_proof_hex,
         );
 
         if bc.validate_next_block(&new_block).is_err() {

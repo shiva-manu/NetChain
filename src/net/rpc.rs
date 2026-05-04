@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use sha2::Digest;
 use tracing::{error, info};
 
 use crate::blockchain::Blockchain;
@@ -245,6 +246,50 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
                 "proposal_quorum_bps": params.proposal_quorum_bps,
                 "proposal_approval_bps": params.proposal_approval_bps,
                 "min_proposal_stake": params.min_proposal_stake,
+            }))
+        }
+
+        RpcRequest::FaucetTokens { address } => {
+            if address.is_empty() {
+                return RpcResponse::error("Invalid address");
+            }
+
+            const FAUCET_AMOUNT: u64 = 10;
+            const FAUCET_SOURCE: &str = "genesis_account";
+
+            let mut state = rpc_state.state.lock().await;
+
+            // Ensure source has enough balance
+            let source_balance = state.accounts.get(FAUCET_SOURCE).map(|a| a.balance).unwrap_or(0);
+            if source_balance < FAUCET_AMOUNT {
+                return RpcResponse::error("Faucet is empty");
+            }
+
+            // Debit source
+            if let Some(source) = state.accounts.get_mut(FAUCET_SOURCE) {
+                source.balance -= FAUCET_AMOUNT;
+            }
+
+            // Credit recipient
+            let recipient = state.accounts.entry(address.clone()).or_insert_with(|| {
+                crate::state::Account::new(0)
+            });
+            recipient.balance += FAUCET_AMOUNT;
+
+            // Generate a synthetic tx hash
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let hash_input = format!("faucet:{}:{}:{}", address, FAUCET_AMOUNT, now);
+            let hash_bytes = sha2::Sha256::digest(hash_input.as_bytes());
+            let tx_hash = hex::encode(hash_bytes);
+
+            RpcResponse::success(serde_json::json!({
+                "tx_hash": tx_hash,
+                "amount": FAUCET_AMOUNT,
+                "recipient": address,
+                "message": format!("{} NCN sent to {}", FAUCET_AMOUNT, address),
             }))
         }
     }
