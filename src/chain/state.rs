@@ -1,5 +1,7 @@
 // src/chain/state.rs
 
+use crate::contract::{code_hash, derive_contract_address, ContractInfo};
+use crate::token::{derive_nft_id, derive_token_id, NftInfo, TokenInfo, TokenRegistry};
 use crate::transaction::{ProposalAction, SignedTransaction, Transaction, TransactionType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +22,19 @@ pub enum StateError {
     DuplicateVote,
     NotEnoughStakeToPropose,
     InvalidProposalAction,
+    ContractNotFound,
+    ContractAlreadyExists,
+    OutOfGas,
+    ContractExecutionFailed(String),
+    InvalidWasmModule,
+    TokenNotFound,
+    TokenNotMintable,
+    TokenNotBurnable,
+    MaxSupplyReached,
+    InsufficientTokenBalance,
+    NftNotFound,
+    NotTokenCreator,
+    NftNotOwner,
 }
 
 /// Account state
@@ -123,6 +138,58 @@ pub enum StateEvent {
         yes_votes: u64,
         no_votes: u64,
     },
+    /// A smart contract was deployed.
+    ContractDeployed {
+        contract_address: String,
+        deployer: String,
+    },
+    /// A smart contract was called.
+    ContractCalled {
+        contract_address: String,
+        caller: String,
+        function: String,
+        gas_used: u64,
+    },
+    /// A new fungible token was created.
+    TokenCreated {
+        token_id: String,
+        name: String,
+        symbol: String,
+        creator: String,
+    },
+    /// Tokens were minted.
+    TokenMinted {
+        token_id: String,
+        to: String,
+        amount: u64,
+    },
+    /// Tokens were transferred.
+    TokenTransferred {
+        token_id: String,
+        from: String,
+        to: String,
+        amount: u64,
+    },
+    /// Tokens were burned.
+    TokenBurned {
+        token_id: String,
+        from: String,
+        amount: u64,
+    },
+    /// A new NFT was created.
+    NftCreated {
+        nft_id: String,
+        collection_id: String,
+        owner: String,
+    },
+    /// An NFT was transferred.
+    NftTransferred {
+        nft_id: String,
+        from: String,
+        to: String,
+    },
+    /// An NFT was burned.
+    NftBurned { nft_id: String, owner: String },
 }
 
 /// Reason a validator was slashed.
@@ -224,6 +291,15 @@ pub struct State {
     /// Slashing penalty configuration.
     #[serde(default)]
     pub slashing_config: SlashingConfig,
+    /// Deployed contracts: address -> ContractInfo
+    #[serde(default)]
+    pub contracts: HashMap<String, ContractInfo>,
+    /// Contract storage: contract_address -> (key -> value)
+    #[serde(default)]
+    pub contract_storage: HashMap<String, HashMap<Vec<u8>, Vec<u8>>>,
+    /// Token registry for fungible and non-fungible tokens
+    #[serde(default)]
+    pub token_registry: TokenRegistry,
 }
 
 impl State {
@@ -237,6 +313,9 @@ impl State {
             chain_params: ChainParams::default(),
             slashing_records: Vec::new(),
             slashing_config: SlashingConfig::default(),
+            contracts: HashMap::new(),
+            contract_storage: HashMap::new(),
+            token_registry: TokenRegistry::new(),
         }
     }
 
@@ -254,6 +333,9 @@ impl State {
             chain_params: ChainParams::default(),
             slashing_records: Vec::new(),
             slashing_config: SlashingConfig::default(),
+            contracts: HashMap::new(),
+            contract_storage: HashMap::new(),
+            token_registry: TokenRegistry::new(),
         }
     }
 
@@ -267,6 +349,9 @@ impl State {
             chain_params: ChainParams::default(),
             slashing_records: Vec::new(),
             slashing_config: SlashingConfig::default(),
+            contracts: HashMap::new(),
+            contract_storage: HashMap::new(),
+            token_registry: TokenRegistry::new(),
         }
     }
 
@@ -407,6 +492,138 @@ impl State {
                 }
                 if self.get_staked_balance(&t.sender) == 0 {
                     return Err(StateError::InsufficientStake);
+                }
+            }
+            TransactionType::DeployContract {
+                wasm_code,
+                gas_limit,
+            } => {
+                if wasm_code.is_empty() {
+                    return Err(StateError::InvalidWasmModule);
+                }
+                if *gas_limit == 0 || *gas_limit > 10_000_000 {
+                    return Err(StateError::ZeroAmount);
+                }
+                // Check deployer can pay gas cost
+                let gas_cost = *gas_limit; // 1:1 gas to token ratio
+                let required = gas_cost + t.fee;
+                if sender.balance < required {
+                    return Err(StateError::InsufficientBalance);
+                }
+            }
+            TransactionType::CallContract {
+                contract_address,
+                gas_limit,
+                ..
+            } => {
+                if contract_address.is_empty() {
+                    return Err(StateError::ContractNotFound);
+                }
+                if !self.contracts.contains_key(contract_address) {
+                    return Err(StateError::ContractNotFound);
+                }
+                if *gas_limit == 0 || *gas_limit > 10_000_000 {
+                    return Err(StateError::ZeroAmount);
+                }
+                let gas_cost = *gas_limit;
+                let required = t.amount + gas_cost + t.fee;
+                if sender.balance < required {
+                    return Err(StateError::InsufficientBalance);
+                }
+            }
+            TransactionType::CreateToken { name, symbol, .. } => {
+                if name.trim().is_empty() || symbol.trim().is_empty() {
+                    return Err(StateError::ZeroAmount);
+                }
+            }
+            TransactionType::MintToken {
+                token_id,
+                to: _,
+                amount,
+            } => {
+                if *amount == 0 {
+                    return Err(StateError::ZeroAmount);
+                }
+                let token = self
+                    .token_registry
+                    .tokens
+                    .get(token_id)
+                    .ok_or(StateError::TokenNotFound)?;
+                if !token.is_mintable {
+                    return Err(StateError::TokenNotMintable);
+                }
+                if token.creator != t.sender {
+                    return Err(StateError::NotTokenCreator);
+                }
+                if let Some(max) = token.max_supply {
+                    if token.total_supply + amount > max {
+                        return Err(StateError::MaxSupplyReached);
+                    }
+                }
+            }
+            TransactionType::TransferToken {
+                token_id,
+                to: _,
+                amount,
+            } => {
+                if *amount == 0 {
+                    return Err(StateError::ZeroAmount);
+                }
+                if !self.token_registry.tokens.contains_key(token_id) {
+                    return Err(StateError::TokenNotFound);
+                }
+                let balance = self.token_registry.get_token_balance(&t.sender, token_id);
+                if balance < *amount {
+                    return Err(StateError::InsufficientTokenBalance);
+                }
+            }
+            TransactionType::BurnToken { token_id, amount } => {
+                if *amount == 0 {
+                    return Err(StateError::ZeroAmount);
+                }
+                let token = self
+                    .token_registry
+                    .tokens
+                    .get(token_id)
+                    .ok_or(StateError::TokenNotFound)?;
+                if !token.is_burnable {
+                    return Err(StateError::TokenNotBurnable);
+                }
+                let balance = self.token_registry.get_token_balance(&t.sender, token_id);
+                if balance < *amount {
+                    return Err(StateError::InsufficientTokenBalance);
+                }
+            }
+            TransactionType::CreateNFT {
+                collection_id,
+                name,
+                metadata_uri: _,
+            } => {
+                if name.trim().is_empty() {
+                    return Err(StateError::ZeroAmount);
+                }
+                if !self.token_registry.tokens.contains_key(collection_id) {
+                    return Err(StateError::TokenNotFound);
+                }
+            }
+            TransactionType::TransferNFT { nft_id, to: _ } => {
+                let nft = self
+                    .token_registry
+                    .nfts
+                    .get(nft_id)
+                    .ok_or(StateError::NftNotFound)?;
+                if nft.owner != t.sender {
+                    return Err(StateError::NftNotOwner);
+                }
+            }
+            TransactionType::BurnNFT { nft_id } => {
+                let nft = self
+                    .token_registry
+                    .nfts
+                    .get(nft_id)
+                    .ok_or(StateError::NftNotFound)?;
+                if nft.owner != t.sender {
+                    return Err(StateError::NftNotOwner);
                 }
             }
         }
@@ -552,6 +769,252 @@ impl State {
                     support: *support,
                     yes_votes: proposal.yes_votes,
                     no_votes: proposal.no_votes,
+                })
+            }
+            TransactionType::DeployContract {
+                wasm_code,
+                gas_limit,
+            } => {
+                // Derive contract address from deployer + nonce
+                let contract_address = derive_contract_address(&t.sender, t.nonce);
+                let ch = code_hash(wasm_code);
+
+                // Create contract info
+                let contract_info = ContractInfo {
+                    address: contract_address.clone(),
+                    deployer: t.sender.clone(),
+                    code_hash: ch,
+                    created_at: now,
+                };
+
+                // Store contract bytecode in contract_storage under a special "__code" key
+                let code_storage = self
+                    .contract_storage
+                    .entry(contract_address.clone())
+                    .or_default();
+                code_storage.insert(b"__code".to_vec(), wasm_code.clone());
+
+                // Store contract info
+                self.contracts
+                    .insert(contract_address.clone(), contract_info);
+
+                // Deduct gas cost (return unused gas is not implemented for simplicity)
+                let gas_cost = *gas_limit;
+                let sender = self.accounts.get_mut(&t.sender).expect("Sender must exist");
+                sender.balance = sender.balance.saturating_sub(gas_cost);
+
+                info!(
+                    deployer = %t.sender,
+                    contract = %contract_address,
+                    "deployed contract"
+                );
+
+                Some(StateEvent::ContractDeployed {
+                    contract_address,
+                    deployer: t.sender.clone(),
+                })
+            }
+            TransactionType::CallContract {
+                contract_address,
+                function,
+                args: _,
+                gas_limit,
+            } => {
+                // Verify contract exists (already validated)
+                let _contract = self
+                    .contracts
+                    .get(contract_address)
+                    .expect("Contract must exist after validation");
+
+                // Load contract code
+                let _code = self
+                    .contract_storage
+                    .get(contract_address)
+                    .and_then(|storage| storage.get(b"__code".as_ref()))
+                    .cloned()
+                    .unwrap_or_default();
+
+                // In a full implementation, we would execute the WASM code here
+                // using the vm::execute function. For now, we charge gas and
+                // emit the event. The actual VM execution will be integrated
+                // when the contract storage is fully wired.
+
+                let gas_used = *gas_limit / 2; // Simulate 50% gas usage for now
+
+                // Deduct gas cost
+                let sender = self.accounts.get_mut(&t.sender).expect("Sender must exist");
+                sender.balance = sender.balance.saturating_sub(gas_used);
+
+                // Transfer value to contract if non-zero
+                if t.amount > 0 {
+                    let contract_account = self
+                        .accounts
+                        .entry(contract_address.clone())
+                        .or_insert(Account::new(0));
+                    contract_account.balance += t.amount;
+                }
+
+                info!(
+                    caller = %t.sender,
+                    contract = %contract_address,
+                    function = %function,
+                    gas_used,
+                    "called contract"
+                );
+
+                Some(StateEvent::ContractCalled {
+                    contract_address: contract_address.clone(),
+                    caller: t.sender.clone(),
+                    function: function.clone(),
+                    gas_used,
+                })
+            }
+            TransactionType::CreateToken {
+                name,
+                symbol,
+                decimals,
+                max_supply,
+                is_mintable,
+                is_burnable,
+            } => {
+                let token_id = derive_token_id(&t.sender, name, symbol, now);
+                let token = TokenInfo {
+                    token_id: token_id.clone(),
+                    creator: t.sender.clone(),
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    decimals: *decimals,
+                    total_supply: 0,
+                    max_supply: *max_supply,
+                    is_mintable: *is_mintable,
+                    is_burnable: *is_burnable,
+                    created_at: now,
+                };
+                self.token_registry.tokens.insert(token_id.clone(), token);
+                info!(creator = %t.sender, token_id = %token_id, name = %name, symbol = %symbol, "created token");
+                Some(StateEvent::TokenCreated {
+                    token_id,
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    creator: t.sender.clone(),
+                })
+            }
+            TransactionType::MintToken {
+                token_id,
+                to,
+                amount,
+            } => {
+                // Update total supply
+                let token = self
+                    .token_registry
+                    .tokens
+                    .get_mut(token_id)
+                    .expect("Token must exist after validation");
+                token.total_supply += amount;
+
+                // Credit recipient
+                let current = self.token_registry.get_token_balance(to, token_id);
+                self.token_registry
+                    .set_token_balance(to, token_id, current + amount);
+
+                info!(token_id = %token_id, to = %to, amount, "minted tokens");
+                Some(StateEvent::TokenMinted {
+                    token_id: token_id.clone(),
+                    to: to.clone(),
+                    amount: *amount,
+                })
+            }
+            TransactionType::TransferToken {
+                token_id,
+                to,
+                amount,
+            } => {
+                // Debit sender
+                let sender_balance = self.token_registry.get_token_balance(&t.sender, token_id);
+                self.token_registry
+                    .set_token_balance(&t.sender, token_id, sender_balance - amount);
+
+                // Credit recipient
+                let receiver_balance = self.token_registry.get_token_balance(to, token_id);
+                self.token_registry
+                    .set_token_balance(to, token_id, receiver_balance + amount);
+
+                Some(StateEvent::TokenTransferred {
+                    token_id: token_id.clone(),
+                    from: t.sender.clone(),
+                    to: to.clone(),
+                    amount: *amount,
+                })
+            }
+            TransactionType::BurnToken { token_id, amount } => {
+                // Debit sender
+                let sender_balance = self.token_registry.get_token_balance(&t.sender, token_id);
+                self.token_registry
+                    .set_token_balance(&t.sender, token_id, sender_balance - amount);
+
+                // Reduce total supply
+                let token = self
+                    .token_registry
+                    .tokens
+                    .get_mut(token_id)
+                    .expect("Token must exist after validation");
+                token.total_supply -= amount;
+
+                info!(token_id = %token_id, from = %t.sender, amount, "burned tokens");
+                Some(StateEvent::TokenBurned {
+                    token_id: token_id.clone(),
+                    from: t.sender.clone(),
+                    amount: *amount,
+                })
+            }
+            TransactionType::CreateNFT {
+                collection_id,
+                name,
+                metadata_uri,
+            } => {
+                let nft_id = derive_nft_id(collection_id, &t.sender, name, now);
+                let nft = NftInfo {
+                    nft_id: nft_id.clone(),
+                    collection_id: collection_id.clone(),
+                    owner: t.sender.clone(),
+                    creator: t.sender.clone(),
+                    name: name.clone(),
+                    metadata_uri: metadata_uri.clone(),
+                    created_at: now,
+                };
+                self.token_registry.nfts.insert(nft_id.clone(), nft);
+                info!(creator = %t.sender, nft_id = %nft_id, name = %name, "created NFT");
+                Some(StateEvent::NftCreated {
+                    nft_id,
+                    collection_id: collection_id.clone(),
+                    owner: t.sender.clone(),
+                })
+            }
+            TransactionType::TransferNFT { nft_id, to } => {
+                let nft = self
+                    .token_registry
+                    .nfts
+                    .get_mut(nft_id)
+                    .expect("NFT must exist after validation");
+                let from = nft.owner.clone();
+                nft.owner = to.clone();
+                info!(nft_id = %nft_id, from = %from, to = %to, "transferred NFT");
+                Some(StateEvent::NftTransferred {
+                    nft_id: nft_id.clone(),
+                    from,
+                    to: to.clone(),
+                })
+            }
+            TransactionType::BurnNFT { nft_id } => {
+                let nft = self
+                    .token_registry
+                    .nfts
+                    .remove(nft_id)
+                    .expect("NFT must exist after validation");
+                info!(nft_id = %nft_id, owner = %nft.owner, "burned NFT");
+                Some(StateEvent::NftBurned {
+                    nft_id: nft_id.clone(),
+                    owner: nft.owner,
                 })
             }
         };

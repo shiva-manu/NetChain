@@ -13,6 +13,10 @@ pub mod blockchain;
 pub mod config;
 #[path = "poi/consensus.rs"]
 pub mod consensus;
+#[path = "chain/contract.rs"]
+pub mod contract;
+#[path = "chain/contract_storage.rs"]
+pub mod contract_storage;
 #[path = "net/dht.rs"]
 pub mod dht;
 #[path = "poi/epoch_manager.rs"]
@@ -31,6 +35,8 @@ pub mod monitoring;
 pub mod p2p;
 #[path = "node/producer.rs"]
 pub mod producer;
+#[path = "net/rest_types.rs"]
+pub mod rest_types;
 #[path = "net/rpc.rs"]
 pub mod rpc;
 #[path = "net/rpc_types.rs"]
@@ -39,8 +45,12 @@ pub mod rpc_types;
 pub mod state;
 #[path = "node/storage.rs"]
 pub mod storage;
+#[path = "chain/token.rs"]
+pub mod token;
 #[path = "chain/transaction.rs"]
 pub mod transaction;
+#[path = "chain/vm.rs"]
+pub mod vm;
 #[path = "wallet/mod.rs"]
 pub mod wallet;
 #[path = "net/websocket.rs"]

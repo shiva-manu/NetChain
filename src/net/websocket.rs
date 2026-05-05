@@ -21,6 +21,9 @@ pub enum WsTopic {
     NewTransactions,
     Proposals,
     Slashing,
+    Contracts,
+    Tokens,
+    Nfts,
 }
 
 /// Events broadcast to WebSocket subscribers
@@ -58,6 +61,56 @@ pub enum WsEvent {
         amount_burned: u64,
         remaining_stake: u64,
     },
+    #[serde(rename = "contract_deployed")]
+    ContractDeployed {
+        contract_address: String,
+        deployer: String,
+        code_hash: String,
+    },
+    #[serde(rename = "contract_called")]
+    ContractCalled {
+        contract_address: String,
+        caller: String,
+        function: String,
+        gas_used: u64,
+    },
+    #[serde(rename = "token_created")]
+    TokenCreated {
+        token_id: String,
+        creator: String,
+        name: String,
+        symbol: String,
+    },
+    #[serde(rename = "token_minted")]
+    TokenMinted {
+        token_id: String,
+        to: String,
+        amount: u64,
+    },
+    #[serde(rename = "token_transferred")]
+    TokenTransferred {
+        token_id: String,
+        from: String,
+        to: String,
+        amount: u64,
+    },
+    #[serde(rename = "token_burned")]
+    TokenBurned { token_id: String, amount: u64 },
+    #[serde(rename = "nft_created")]
+    NftCreated {
+        nft_id: String,
+        collection_id: String,
+        creator: String,
+        name: String,
+    },
+    #[serde(rename = "nft_transferred")]
+    NftTransferred {
+        nft_id: String,
+        from: String,
+        to: String,
+    },
+    #[serde(rename = "nft_burned")]
+    NftBurned { nft_id: String },
 }
 
 impl WsEvent {
@@ -67,6 +120,14 @@ impl WsEvent {
             WsEvent::NewTransaction { .. } => WsTopic::NewTransactions,
             WsEvent::ProposalUpdate { .. } => WsTopic::Proposals,
             WsEvent::ValidatorSlashed { .. } => WsTopic::Slashing,
+            WsEvent::ContractDeployed { .. } | WsEvent::ContractCalled { .. } => WsTopic::Contracts,
+            WsEvent::TokenCreated { .. }
+            | WsEvent::TokenMinted { .. }
+            | WsEvent::TokenTransferred { .. }
+            | WsEvent::TokenBurned { .. } => WsTopic::Tokens,
+            WsEvent::NftCreated { .. }
+            | WsEvent::NftTransferred { .. }
+            | WsEvent::NftBurned { .. } => WsTopic::Nfts,
         }
     }
 }

@@ -151,6 +151,82 @@ fn state_event_to_ws(event: &StateEvent) -> WsEvent {
             yes_votes: *yes_votes,
             no_votes: *no_votes,
         },
+        StateEvent::ContractDeployed {
+            contract_address,
+            deployer,
+        } => WsEvent::ContractDeployed {
+            contract_address: contract_address.clone(),
+            deployer: deployer.clone(),
+            code_hash: String::new(),
+        },
+        StateEvent::ContractCalled {
+            contract_address,
+            caller,
+            function,
+            gas_used,
+        } => WsEvent::ContractCalled {
+            contract_address: contract_address.clone(),
+            caller: caller.clone(),
+            function: function.clone(),
+            gas_used: *gas_used,
+        },
+        StateEvent::TokenCreated {
+            token_id,
+            creator,
+            name,
+            symbol,
+        } => WsEvent::TokenCreated {
+            token_id: token_id.clone(),
+            creator: creator.clone(),
+            name: name.clone(),
+            symbol: symbol.clone(),
+        },
+        StateEvent::TokenMinted {
+            token_id,
+            to,
+            amount,
+        } => WsEvent::TokenMinted {
+            token_id: token_id.clone(),
+            to: to.clone(),
+            amount: *amount,
+        },
+        StateEvent::TokenTransferred {
+            token_id,
+            from,
+            to,
+            amount,
+        } => WsEvent::TokenTransferred {
+            token_id: token_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            amount: *amount,
+        },
+        StateEvent::TokenBurned {
+            token_id,
+            from: _,
+            amount,
+        } => WsEvent::TokenBurned {
+            token_id: token_id.clone(),
+            amount: *amount,
+        },
+        StateEvent::NftCreated {
+            nft_id,
+            collection_id,
+            owner,
+        } => WsEvent::NftCreated {
+            nft_id: nft_id.clone(),
+            collection_id: collection_id.clone(),
+            creator: owner.clone(),
+            name: String::new(),
+        },
+        StateEvent::NftTransferred { nft_id, from, to } => WsEvent::NftTransferred {
+            nft_id: nft_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        StateEvent::NftBurned { nft_id, owner: _ } => WsEvent::NftBurned {
+            nft_id: nft_id.clone(),
+        },
     }
 }
 
@@ -394,11 +470,18 @@ async fn main() -> Result<()> {
     };
 
     // Start RPC server for wallet CLI
+    let tx_index = {
+        let bc = blockchain.lock().await;
+        Arc::new(tokio::sync::Mutex::new(
+            netchain::rpc::build_tx_index(&bc).await,
+        ))
+    };
     let rpc_state = Arc::new(RpcState {
         blockchain: blockchain.clone(),
         state: state.clone(),
         mempool: mempool.clone(),
         p2p: p2p_handle.clone(),
+        tx_index: tx_index.clone(),
     });
 
     let rpc_bind_addr = config.rpc.bind_addr.clone();
@@ -526,6 +609,7 @@ async fn main() -> Result<()> {
     let aggregator_epoch = metrics_aggregator.clone();
     let ws_tx_producer = ws_event_tx.clone();
     let mempool_ttl_secs = config.producer.mempool_ttl_secs;
+    let tx_index_producer = tx_index.clone();
 
     tokio::spawn(async move {
         loop {
@@ -570,6 +654,14 @@ async fn main() -> Result<()> {
                 // Save block to storage
                 if let Err(e) = storage_producer.save_block(&new_block) {
                     error!(error = %e, "failed to save produced block");
+                }
+
+                // Update transaction index
+                {
+                    let mut idx = tx_index_producer.lock().await;
+                    for (tx_idx, signed_tx) in new_block.transactions.iter().enumerate() {
+                        idx.insert(signed_tx.tx_hash_hex(), (new_block.index, tx_idx));
+                    }
                 }
 
                 // Save state to storage
@@ -734,6 +826,7 @@ async fn main() -> Result<()> {
     let storage_main = storage.clone();
     let ws_tx_main = ws_event_tx.clone();
     let p2p = p2p_handle.clone();
+    let tx_index_main = tx_index.clone();
     while let Some(event) = rx.recv().await {
         match event {
             P2PEvent::Message(NetworkMessage::Block(block_json)) => {
@@ -875,6 +968,14 @@ async fn main() -> Result<()> {
                         // Save block and state to storage
                         if let Err(e) = storage_main.save_block(&block) {
                             warn!(error = %e, "failed to persist accepted block");
+                        }
+
+                        // Update transaction index
+                        {
+                            let mut idx = tx_index_main.lock().await;
+                            for (tx_idx, signed_tx) in block.transactions.iter().enumerate() {
+                                idx.insert(signed_tx.tx_hash_hex(), (block.index, tx_idx));
+                            }
                         }
                         {
                             let state_guard = state.lock().await;
@@ -1036,6 +1137,14 @@ async fn main() -> Result<()> {
                                             error = %e,
                                             "failed to persist rebuilt state after sync"
                                         );
+                                    }
+
+                                    // Rebuild transaction index after sync
+                                    {
+                                        let bc = blockchain.lock().await;
+                                        let new_idx = netchain::rpc::build_tx_index(&bc).await;
+                                        let mut idx = tx_index_main.lock().await;
+                                        *idx = new_idx;
                                     }
 
                                     if result.reorged {

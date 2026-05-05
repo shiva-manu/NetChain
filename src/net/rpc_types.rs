@@ -35,6 +35,20 @@ pub enum RpcRequest {
     GetChainParams,
     #[serde(rename = "faucet_tokens")]
     FaucetTokens { address: String },
+    #[serde(rename = "get_contract")]
+    GetContract { address: String },
+    #[serde(rename = "list_contracts")]
+    ListContracts,
+    #[serde(rename = "get_token")]
+    GetToken { token_id: String },
+    #[serde(rename = "get_token_balance")]
+    GetTokenBalance { address: String, token_id: String },
+    #[serde(rename = "list_tokens")]
+    ListTokens,
+    #[serde(rename = "get_nft")]
+    GetNft { nft_id: String },
+    #[serde(rename = "get_nft_owner")]
+    GetNftOwner { nft_id: String },
 }
 
 /// RPC Response types

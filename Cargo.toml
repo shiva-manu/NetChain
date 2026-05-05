@@ -73,6 +73,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Persistent storage
 sled = "0.34"
 
+# WASM smart contract VM
+wasmi = "0.40"
+
 # libp2p (FULL REQUIRED FEATURE SET)
 libp2p = { version = "0.56", features = [
     "tokio",
@@ -88,3 +91,4 @@ libp2p = { version = "0.56", features = [
 
 [dev-dependencies]
 tempfile = "3.10"
+wat = "1.0"

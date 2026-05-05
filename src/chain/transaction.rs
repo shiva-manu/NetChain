@@ -38,6 +38,65 @@ pub enum TransactionType {
         proposal_id: u64,
         support: bool,
     },
+    /// Deploy a WASM smart contract
+    DeployContract {
+        /// WASM bytecode (base64-encoded in JSON)
+        wasm_code: Vec<u8>,
+        /// Gas limit for deployment
+        gas_limit: u64,
+    },
+    /// Call a deployed smart contract
+    CallContract {
+        /// Address of the contract to call
+        contract_address: String,
+        /// Function name to call
+        function: String,
+        /// Encoded arguments (base64-encoded in JSON)
+        args: Vec<u8>,
+        /// Gas limit for execution
+        gas_limit: u64,
+    },
+    /// Create a new fungible token
+    CreateToken {
+        name: String,
+        symbol: String,
+        decimals: u8,
+        max_supply: Option<u64>,
+        is_mintable: bool,
+        is_burnable: bool,
+    },
+    /// Mint new tokens to an address
+    MintToken {
+        token_id: String,
+        to: String,
+        amount: u64,
+    },
+    /// Transfer tokens between addresses
+    TransferToken {
+        token_id: String,
+        to: String,
+        amount: u64,
+    },
+    /// Burn tokens
+    BurnToken {
+        token_id: String,
+        amount: u64,
+    },
+    /// Create a new NFT
+    CreateNFT {
+        collection_id: String,
+        name: String,
+        metadata_uri: String,
+    },
+    /// Transfer an NFT to another address
+    TransferNFT {
+        nft_id: String,
+        to: String,
+    },
+    /// Burn an NFT
+    BurnNFT {
+        nft_id: String,
+    },
 }
 
 /// Actions that a governance proposal can execute when it passes
@@ -196,6 +255,189 @@ impl Transaction {
             proposal_id,
             support,
         };
+        tx
+    }
+
+    pub fn deploy_contract(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        wasm_code: Vec<u8>,
+        gas_limit: u64,
+    ) -> Self {
+        let mut tx = Self::new(
+            sender,
+            String::new(),
+            0,
+            fee,
+            nonce,
+            Some("deploy_contract".into()),
+        );
+        tx.tx_type = TransactionType::DeployContract {
+            wasm_code,
+            gas_limit,
+        };
+        tx
+    }
+
+    pub fn call_contract(
+        sender: String,
+        contract_address: String,
+        function: String,
+        args: Vec<u8>,
+        gas_limit: u64,
+        amount: u64,
+        fee: u64,
+        nonce: u64,
+    ) -> Self {
+        let mut tx = Self::new(
+            sender,
+            contract_address.clone(),
+            amount,
+            fee,
+            nonce,
+            Some("call_contract".into()),
+        );
+        tx.tx_type = TransactionType::CallContract {
+            contract_address,
+            function,
+            args,
+            gas_limit,
+        };
+        tx
+    }
+
+    pub fn create_token(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        name: String,
+        symbol: String,
+        decimals: u8,
+        max_supply: Option<u64>,
+        is_mintable: bool,
+        is_burnable: bool,
+    ) -> Self {
+        let mut tx = Self::new(
+            sender,
+            String::new(),
+            0,
+            fee,
+            nonce,
+            Some("create_token".into()),
+        );
+        tx.tx_type = TransactionType::CreateToken {
+            name,
+            symbol,
+            decimals,
+            max_supply,
+            is_mintable,
+            is_burnable,
+        };
+        tx
+    }
+
+    pub fn mint_token(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        token_id: String,
+        to: String,
+        amount: u64,
+    ) -> Self {
+        let mut tx = Self::new(sender, to.clone(), 0, fee, nonce, Some("mint_token".into()));
+        tx.tx_type = TransactionType::MintToken {
+            token_id,
+            to,
+            amount,
+        };
+        tx
+    }
+
+    pub fn transfer_token(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        token_id: String,
+        to: String,
+        amount: u64,
+    ) -> Self {
+        let mut tx = Self::new(
+            sender,
+            to.clone(),
+            0,
+            fee,
+            nonce,
+            Some("transfer_token".into()),
+        );
+        tx.tx_type = TransactionType::TransferToken {
+            token_id,
+            to,
+            amount,
+        };
+        tx
+    }
+
+    pub fn burn_token(sender: String, fee: u64, nonce: u64, token_id: String, amount: u64) -> Self {
+        let mut tx = Self::new(
+            sender,
+            String::new(),
+            0,
+            fee,
+            nonce,
+            Some("burn_token".into()),
+        );
+        tx.tx_type = TransactionType::BurnToken { token_id, amount };
+        tx
+    }
+
+    pub fn create_nft(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        collection_id: String,
+        name: String,
+        metadata_uri: String,
+    ) -> Self {
+        let mut tx = Self::new(
+            sender,
+            String::new(),
+            0,
+            fee,
+            nonce,
+            Some("create_nft".into()),
+        );
+        tx.tx_type = TransactionType::CreateNFT {
+            collection_id,
+            name,
+            metadata_uri,
+        };
+        tx
+    }
+
+    pub fn transfer_nft(sender: String, fee: u64, nonce: u64, nft_id: String, to: String) -> Self {
+        let mut tx = Self::new(
+            sender,
+            to.clone(),
+            0,
+            fee,
+            nonce,
+            Some("transfer_nft".into()),
+        );
+        tx.tx_type = TransactionType::TransferNFT { nft_id, to };
+        tx
+    }
+
+    pub fn burn_nft(sender: String, fee: u64, nonce: u64, nft_id: String) -> Self {
+        let mut tx = Self::new(
+            sender,
+            String::new(),
+            0,
+            fee,
+            nonce,
+            Some("burn_nft".into()),
+        );
+        tx.tx_type = TransactionType::BurnNFT { nft_id };
         tx
     }
 

@@ -3,3 +3,5 @@
 /.env
 .aider*
 website/tsconfig.tsbuildinfo
+# Added by code-review-graph
+.code-review-graph/

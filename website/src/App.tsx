@@ -6,6 +6,9 @@ import { Footer } from "@/components/sections/footer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Dashboard } from "@/pages/dashboard";
 import { DocsPage } from "@/pages/docs";
+import { ExplorerPage } from "@/pages/explorer";
+import { ExplorerBlockPage } from "@/pages/explorer-block";
+import { ExplorerAccountPage } from "@/pages/explorer-account";
 import { FaucetPage } from "@/pages/faucet";
 import { FeaturesPage } from "@/pages/features";
 import { GetStartedPage } from "@/pages/get-started";
@@ -54,6 +57,10 @@ function App() {
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="dashboard" element={<Dashboard />} />
         </Route>
+        {/* Explorer routes */}
+        <Route path="explorer" element={<ExplorerPage />} />
+        <Route path="explorer/block/:height" element={<ExplorerBlockPage />} />
+        <Route path="explorer/account/:address" element={<ExplorerAccountPage />} />
         {/* Redirect old routes */}
         <Route path="/how-it-works" element={<Navigate to="/" replace />} />
         <Route path="/governance" element={<Navigate to="/features" replace />} />
