@@ -3,13 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::anti_gaming::AntiGamingConfig;
-use crate::dht::DhtConfig;
-use crate::epoch_manager::EpochConfig;
 use crate::measurement::MeasurementConfig;
-use crate::metric_challenge::MetricChallengeConfig;
-use crate::metrics_aggregator::AggregatorConfig;
-use crate::state::SlashingConfig;
+use crate::state::ChainParams;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,12 +15,8 @@ pub struct AppConfig {
     pub websocket: WebSocketConfig,
     pub producer: ProducerRuntimeConfig,
     pub measurement: MeasurementConfig,
-    pub aggregator: AggregatorConfig,
-    pub anti_gaming: AntiGamingConfig,
-    pub slashing: SlashingConfig,
-    pub dht: DhtConfig,
-    pub epoch: EpochConfig,
-    pub metric_challenge: MetricChallengeConfig,
+    pub faucet: FaucetConfig,
+    pub poi: PoiRuntimeConfig,
 }
 
 impl Default for AppConfig {
@@ -37,12 +28,8 @@ impl Default for AppConfig {
             websocket: WebSocketConfig::default(),
             producer: ProducerRuntimeConfig::default(),
             measurement: MeasurementConfig::default(),
-            aggregator: AggregatorConfig::default(),
-            anti_gaming: AntiGamingConfig::default(),
-            slashing: SlashingConfig::default(),
-            dht: DhtConfig::default(),
-            epoch: EpochConfig::default(),
-            metric_challenge: MetricChallengeConfig::default(),
+            faucet: FaucetConfig::default(),
+            poi: PoiRuntimeConfig::default(),
         }
     }
 }
@@ -72,6 +59,17 @@ impl AppConfig {
 
     pub fn data_dir(&self) -> PathBuf {
         PathBuf::from(&self.node.data_dir)
+    }
+
+    /// Chain parameters used when this node creates a development genesis.
+    pub fn dev_chain_params(&self) -> ChainParams {
+        ChainParams {
+            block_reward: self.producer.block_reward,
+            block_interval_secs: self.producer.block_interval_secs.max(1),
+            max_txs_per_block: self.producer.max_txs_per_block,
+            stake_weight: self.producer.stake_weight.clamp(0.0, 1.0),
+            ..ChainParams::default()
+        }
     }
 
     fn apply_env_overrides(&mut self) {
@@ -135,20 +133,38 @@ impl AppConfig {
                 self.producer.mempool_ttl_secs = parsed;
             }
         }
-        if let Ok(value) = std::env::var("NETCHAIN_SLASH_INVALID_BLOCK_BPS") {
+        if let Ok(value) = std::env::var("NETCHAIN_GENESIS") {
+            self.node.genesis_file = Some(value);
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_BOOTNODES") {
+            self.node.bootnodes = value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_ENABLE_MDNS") {
+            self.node.enable_mdns = matches!(value.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_ENABLED") {
+            self.faucet.enabled = matches!(value.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_KEY_FILE") {
+            self.faucet.key_file = Some(value);
+        }
+        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_AMOUNT") {
             if let Ok(parsed) = value.parse() {
-                self.slashing.invalid_block_penalty_bps = parsed;
+                self.faucet.amount = parsed;
             }
         }
-        if let Ok(value) = std::env::var("NETCHAIN_SLASH_METRIC_FRAUD_BPS") {
+        if let Ok(value) = std::env::var("NETCHAIN_ATTEST_INTERVAL_SECS") {
             if let Ok(parsed) = value.parse() {
-                self.slashing.metric_fraud_penalty_bps = parsed;
+                self.poi.attest_interval_secs = parsed;
             }
         }
-        if let Ok(value) = std::env::var("NETCHAIN_SLASH_MISSED_BLOCK_BPS") {
-            if let Ok(parsed) = value.parse() {
-                self.slashing.missed_block_penalty_bps = parsed;
-            }
+        if let Ok(value) = std::env::var("NETCHAIN_MEASUREMENT_ENABLED") {
+            self.poi.self_measurement_enabled = matches!(value.as_str(), "1" | "true" | "yes");
         }
     }
 }
@@ -159,6 +175,13 @@ pub struct NodeConfig {
     pub data_dir: String,
     pub p2p_port: u16,
     pub log_level: String,
+    /// Genesis JSON shared by every node of the network. When unset, the node creates a
+    /// single-validator development genesis in `<data_dir>/genesis.json`.
+    pub genesis_file: Option<String>,
+    /// Multiaddrs of peers to connect to, e.g. `/ip4/203.0.113.7/tcp/30333`.
+    pub bootnodes: Vec<String>,
+    /// Discover peers on the local network with mDNS.
+    pub enable_mdns: bool,
 }
 
 impl Default for NodeConfig {
@@ -167,6 +190,59 @@ impl Default for NodeConfig {
             data_dir: "./data".to_string(),
             p2p_port: 30333,
             log_level: "info".to_string(),
+            genesis_file: None,
+            bootnodes: Vec::new(),
+            enable_mdns: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FaucetConfig {
+    pub enabled: bool,
+    /// Key that holds the faucet funds (hex secret, same format as `node_key`).
+    /// Defaults to the node key.
+    pub key_file: Option<String>,
+    pub amount: u64,
+    pub fee: u64,
+    pub cooldown_secs: u64,
+    pub max_per_minute: usize,
+}
+
+impl Default for FaucetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            key_file: None,
+            amount: 200,
+            fee: 1,
+            cooldown_secs: 3_600,
+            max_per_minute: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PoiRuntimeConfig {
+    /// How often a validator measures its validator peers and records attestations on-chain.
+    pub attest_interval_secs: u64,
+    /// Bytes requested per throughput probe.
+    pub probe_bytes: usize,
+    /// Fee paid per attestation transaction.
+    pub attestation_fee: u64,
+    /// Run the periodic Cloudflare speed test (informational only, shown in /metrics).
+    pub self_measurement_enabled: bool,
+}
+
+impl Default for PoiRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            attest_interval_secs: 120,
+            probe_bytes: 1_000_000,
+            attestation_fee: 1,
+            self_measurement_enabled: false,
         }
     }
 }

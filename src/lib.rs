@@ -9,6 +9,8 @@ pub mod anti_gaming;
 pub mod block;
 #[path = "chain/blockchain.rs"]
 pub mod blockchain;
+#[path = "node/chain_service.rs"]
+pub mod chain_service;
 #[path = "app/config.rs"]
 pub mod config;
 #[path = "poi/consensus.rs"]
@@ -19,8 +21,12 @@ pub mod contract;
 pub mod contract_storage;
 #[path = "net/dht.rs"]
 pub mod dht;
+#[path = "chain/engine.rs"]
+pub mod engine;
 #[path = "poi/epoch_manager.rs"]
 pub mod epoch_manager;
+#[path = "chain/genesis.rs"]
+pub mod genesis;
 #[path = "poi/measurement.rs"]
 pub mod measurement;
 #[path = "node/mempool.rs"]
@@ -31,10 +37,10 @@ pub mod metric_challenge;
 pub mod metrics_aggregator;
 #[path = "net/monitoring.rs"]
 pub mod monitoring;
+#[path = "node/node_key.rs"]
+pub mod node_key;
 #[path = "net/p2p.rs"]
 pub mod p2p;
-#[path = "node/producer.rs"]
-pub mod producer;
 #[path = "net/rest_types.rs"]
 pub mod rest_types;
 #[path = "net/rpc.rs"]

@@ -97,6 +97,15 @@ pub enum TransactionType {
     BurnNFT {
         nft_id: String,
     },
+    /// Proof of Internet: an active validator records a network measurement of another
+    /// active validator (round-trip time and throughput measured over the p2p network).
+    AttestMetrics {
+        subject: String,
+        rtt_ms: u64,
+        throughput_kbps: u64,
+    },
+    /// Return a jailed validator to the active set.
+    Unjail,
 }
 
 /// Actions that a governance proposal can execute when it passes
@@ -438,6 +447,31 @@ impl Transaction {
             Some("burn_nft".into()),
         );
         tx.tx_type = TransactionType::BurnNFT { nft_id };
+        tx
+    }
+
+    /// Build a Proof-of-Internet metric attestation about `subject`.
+    pub fn attest_metrics(
+        sender: String,
+        fee: u64,
+        nonce: u64,
+        subject: String,
+        rtt_ms: u64,
+        throughput_kbps: u64,
+    ) -> Self {
+        let mut tx = Self::new(sender, subject.clone(), 0, fee, nonce, None);
+        tx.tx_type = TransactionType::AttestMetrics {
+            subject,
+            rtt_ms,
+            throughput_kbps,
+        };
+        tx
+    }
+
+    /// Ask to leave jail (validator must still have enough stake).
+    pub fn unjail(sender: String, fee: u64, nonce: u64) -> Self {
+        let mut tx = Self::new(sender.clone(), sender, 0, fee, nonce, None);
+        tx.tx_type = TransactionType::Unjail;
         tx
     }
 

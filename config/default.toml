@@ -2,6 +2,13 @@
 data_dir = "./data"
 p2p_port = 30333
 log_level = "info"
+# Genesis file shared by every node of the network. Leave unset to start a private
+# single-validator development chain (written to <data_dir>/genesis.json).
+# genesis_file = "config/genesis.json"
+# Peers to connect to (multiaddrs), e.g. ["/ip4/203.0.113.7/tcp/30333"].
+bootnodes = []
+# Discover peers on the local network.
+enable_mdns = true
 
 [rpc]
 bind_addr = "127.0.0.1"
@@ -17,6 +24,8 @@ enabled = true
 bind_addr = "127.0.0.1"
 port = 8546
 
+# Chain parameters used only when this node creates a development genesis.
+# On a shared network these come from the genesis file.
 [producer]
 max_txs_per_block = 100
 block_interval_secs = 15
@@ -24,6 +33,23 @@ block_reward = 50
 metric_measurement_interval_secs = 120
 stake_weight = 0.3
 mempool_ttl_secs = 900
+
+[faucet]
+enabled = true
+# Hex key file holding the faucet funds; defaults to this node's key.
+# key_file = "./data/faucet_key"
+amount = 200
+fee = 1
+cooldown_secs = 3600
+max_per_minute = 30
+
+[poi]
+# How often a validator probes its validator peers and records attestations on-chain.
+attest_interval_secs = 120
+probe_bytes = 1000000
+attestation_fee = 1
+# Periodic Cloudflare speed test, shown in /metrics only (not used by consensus).
+self_measurement_enabled = false
 
 [measurement]
 download_endpoints = ["https://speed.cloudflare.com/__down?bytes=10000000"]
@@ -33,64 +59,3 @@ download_bytes = 10000000
 upload_bytes = 5000000
 history_size = 10
 min_interval_secs = 60
-
-[aggregator]
-min_attestations = 3
-attestation_max_age_secs = 3600
-reputation_history_epochs = 10
-self_report_weight = 0.2
-blocks_per_epoch = 100
-attestation_decay = 0.95
-
-[anti_gaming]
-outlier_threshold_sigma = 3.0
-min_trusted_attestations = 3
-max_challenges_per_hour = 60
-max_received_challenges_per_hour = 120
-history_size = 100
-suspicious_penalty = 0.5
-
-[anti_gaming.bounds]
-max_download_mbps = 10000.0
-max_upload_mbps = 10000.0
-min_latency_ms = 0.1
-max_latency_ms = 10000.0
-
-[slashing]
-invalid_block_penalty_bps = 1000   # 10% of stake
-metric_fraud_penalty_bps = 500     # 5% of stake
-missed_block_penalty_bps = 100     # 1% of stake
-
-# DHT / Peer Discovery configuration
-[dht]
-enabled = true
-dht_port = 30333
-enable_mdns = true
-bootstrap_interval_secs = 30
-protocol_name = "/netchain/kad/1.0.0"
-
-# Bootstrap nodes for initial peer discovery
-[[dht.bootstrap_nodes]]
-peer_id = "12D3KooWRxEPF5f8qXqf3Z5qXqf3Z5qXqf3Z5qXqf3Z5qXqf3Z5"
-multiaddr = "/ip4/0.0.0.0/tcp/30333"
-name = "NetChain Bootstrap 1"
-
-# Epoch Manager configuration
-[epoch]
-blocks_per_epoch = 100
-history_epochs = 10
-min_attestations_for_validator = 3
-max_active_validators = 100
-reputation_decay = 0.95
-missed_epoch_slash_bps = 500
-top_performer_bonus_bps = 200
-top_performer_count = 10
-
-# Metric Challenge configuration
-[metric_challenge]
-default_challenge_bytes = 5000000
-challenge_timeout_secs = 60
-min_challenge_interval_secs = 300
-max_concurrent_challenges = 3
-min_challenges_for_attestation = 2
-auto_challenge_enabled = true

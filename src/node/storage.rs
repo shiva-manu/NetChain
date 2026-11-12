@@ -14,6 +14,7 @@ const STATE_TREE: &str = "state";
 const META_TREE: &str = "meta";
 const CHAIN_HEIGHT_KEY: &str = "chain_height";
 const FULL_STATE_KEY: &str = "full_state";
+const GENESIS_HASH_KEY: &str = "genesis_hash";
 
 /// Persistent storage manager
 pub struct Storage {
@@ -112,6 +113,34 @@ impl Storage {
     /// Set the chain height
     fn set_chain_height(&self, height: u64) -> Result<()> {
         self.meta.insert(CHAIN_HEIGHT_KEY, &height.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Delete every stored block with index > `height` (used after a chain reorganization).
+    pub fn truncate_above(&self, height: u64) -> Result<()> {
+        let start = (height + 1).to_be_bytes();
+        let keys: Vec<sled::IVec> = self
+            .blocks
+            .range(start..)
+            .keys()
+            .collect::<std::result::Result<_, _>>()?;
+        for key in keys {
+            self.blocks.remove(key)?;
+        }
+        self.set_chain_height(height)?;
+        Ok(())
+    }
+
+    /// Genesis hash of the network this data directory belongs to.
+    pub fn genesis_hash(&self) -> Result<Option<String>> {
+        Ok(self
+            .meta
+            .get(GENESIS_HASH_KEY)?
+            .map(|v| String::from_utf8_lossy(&v).to_string()))
+    }
+
+    pub fn set_genesis_hash(&self, hash: &str) -> Result<()> {
+        self.meta.insert(GENESIS_HASH_KEY, hash.as_bytes())?;
         Ok(())
     }
 

@@ -47,6 +47,49 @@ impl Mempool {
         self.txs.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.txs.is_empty()
+    }
+
+    /// Number of queued transactions from `sender`.
+    pub fn pending_count(&self, sender: &str) -> usize {
+        self.by_sender.get(sender).map(|q| q.len()).unwrap_or(0)
+    }
+
+    /// Drop transactions that are no longer valid on top of `state` (e.g. after a new block
+    /// or a reorg changed nonces/balances), keeping each sender's still-valid prefix.
+    pub fn prune_invalid(&mut self, state: &State) -> usize {
+        let now = current_unix_timestamp();
+        let senders: Vec<String> = self.by_sender.keys().cloned().collect();
+        let mut removed = 0;
+        for sender in senders {
+            let hashes: Vec<String> = self
+                .by_sender
+                .get(&sender)
+                .cloned()
+                .unwrap_or_default()
+                .into();
+            let mut scratch = state.clone();
+            let mut invalid_from = None;
+            for (i, hash) in hashes.iter().enumerate() {
+                let Some(tx) = self.txs.get(hash) else {
+                    continue;
+                };
+                if scratch.apply_transaction_at(tx, now).is_err() {
+                    invalid_from = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = invalid_from {
+                for hash in &hashes[i..] {
+                    self.remove_transaction(hash);
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
     /// Add a transaction to the mempool after validation
     pub fn add_transaction(
         &mut self,
@@ -60,11 +103,6 @@ impl Mempool {
             return Err(MemPoolError::DuplicateTransaction);
         }
 
-        // Validate against current state
-        state
-            .validate_transaction(&tx)
-            .map_err(MemPoolError::InvalidTransaction)?;
-
         let sender = tx.tx.sender.clone();
         let nonce = tx.tx.nonce;
 
@@ -77,6 +115,17 @@ impl Mempool {
                 }
             }
         }
+
+        // Validate as the next transaction after this sender's queued ones, so a sender
+        // (e.g. the faucet) can have several transactions waiting for the same block.
+        let pending: Vec<&SignedTransaction> = self
+            .by_sender
+            .get(&sender)
+            .map(|queue| queue.iter().filter_map(|h| self.txs.get(h)).collect())
+            .unwrap_or_default();
+        state
+            .validate_after_pending(&pending, &tx, current_unix_timestamp())
+            .map_err(MemPoolError::InvalidTransaction)?;
 
         // Insert
         let now = current_unix_timestamp();

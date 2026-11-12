@@ -70,6 +70,62 @@ enum Commands {
         memo: Option<String>,
     },
 
+    /// Import a raw hex key file (e.g. a node's `node_key`) as an encrypted wallet,
+    /// so a validator operator can spend rewards or change stake.
+    ImportKey {
+        /// Wallet name
+        #[arg(short, long)]
+        name: String,
+        /// Path to a file containing the 32-byte secret key as hex
+        #[arg(long)]
+        key_file: PathBuf,
+    },
+
+    /// Bond tokens as validator stake (stake >= min_validator_stake makes the address a validator)
+    Stake {
+        /// Wallet address (or name)
+        #[arg(short, long)]
+        from: String,
+        /// Amount to stake
+        #[arg(short, long)]
+        amount: u64,
+        /// Transaction fee
+        #[arg(long, default_value = "1")]
+        fee: u64,
+    },
+
+    /// Withdraw bonded stake back to the liquid balance
+    Unstake {
+        /// Wallet address (or name)
+        #[arg(short, long)]
+        from: String,
+        /// Amount to unstake
+        #[arg(short, long)]
+        amount: u64,
+        /// Transaction fee
+        #[arg(long, default_value = "1")]
+        fee: u64,
+    },
+
+    /// Return a jailed validator to the active set (nodes also do this automatically)
+    Unjail {
+        /// Wallet address (or name)
+        #[arg(short, long)]
+        from: String,
+        /// Transaction fee
+        #[arg(long, default_value = "1")]
+        fee: u64,
+    },
+
+    /// Request testnet tokens from the node's faucet
+    Faucet {
+        /// Recipient address (or wallet name)
+        address: String,
+    },
+
+    /// Show the active validator set with stake, PoI and uptime scores
+    Validators,
+
     /// Get blockchain status
     Status,
 
@@ -198,6 +254,45 @@ fn load_signing_key(wallet_dir: &PathBuf, wallet: &WalletFile) -> Result<Signing
 
     let loaded = Wallet::load_encrypted(&filepath, password.as_str())?;
     Ok(loaded.signing_key)
+}
+
+/// Sign a transaction built by `build(address, nonce)` with a stored wallet and submit it.
+async fn submit_signed(
+    rpc_url: &str,
+    wallet_dir: &PathBuf,
+    from: &str,
+    label: &str,
+    build: impl FnOnce(String, u64) -> Transaction,
+) -> Result<()> {
+    let wallet_meta = find_wallet(wallet_dir, from)?;
+    let signing_key = load_signing_key(wallet_dir, &wallet_meta)?;
+    let nonce = match rpc_call(
+        rpc_url,
+        RpcRequest::GetNonce {
+            address: wallet_meta.address.clone(),
+        },
+    )
+    .await?
+    {
+        RpcResponse::Success { data } => data["nonce"].as_u64().unwrap_or(0),
+        RpcResponse::Error { message } => return Err(anyhow!("failed to get nonce: {message}")),
+    };
+    let tx = build(wallet_meta.address.clone(), nonce);
+    let signed = SignedTransaction::sign_with_keypair(&tx, &signing_key);
+    let tx_json = serde_json::to_string(&signed)?;
+    match rpc_call(rpc_url, RpcRequest::SendTransaction { tx_json }).await? {
+        RpcResponse::Success { data } => {
+            println!("{label} transaction submitted!");
+            println!("   From:    {}", wallet_meta.address);
+            println!("   Amount:  {}", tx.amount);
+            println!(
+                "   TX Hash: {}",
+                data["tx_hash"].as_str().unwrap_or("unknown")
+            );
+        }
+        RpcResponse::Error { message } => println!("{label} failed: {}", message),
+    }
+    Ok(())
 }
 
 async fn rpc_call(rpc_url: &str, request: RpcRequest) -> Result<RpcResponse> {
@@ -335,6 +430,109 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::ImportKey { name, key_file } => {
+            let contents = Zeroizing::new(std::fs::read_to_string(&key_file)?);
+            let bytes = Zeroizing::new(
+                hex::decode(contents.trim()).map_err(|_| anyhow!("key file is not hex"))?,
+            );
+            let secret: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("key file must contain 32 bytes"))?;
+            let signing_key = SigningKey::from_bytes(&secret);
+            let wallet = Wallet {
+                name: name.clone(),
+                address: Wallet::derive_address(&signing_key.verifying_key()),
+                signing_key,
+            };
+            let password = prompt_new_password()?;
+            let filepath = wallet.save_encrypted(&wallet_dir, password.as_str())?;
+            println!("Key imported.");
+            println!("   Name:    {}", wallet.name);
+            println!("   Address: {}", wallet.address);
+            println!("   File:    {}", filepath.display());
+        }
+
+        Commands::Stake { from, amount, fee } => {
+            submit_signed(&cli.rpc, &wallet_dir, &from, "Stake", |address, nonce| {
+                Transaction::stake(address, amount, fee, nonce)
+            })
+            .await?;
+        }
+
+        Commands::Unstake { from, amount, fee } => {
+            submit_signed(&cli.rpc, &wallet_dir, &from, "Unstake", |address, nonce| {
+                Transaction::unstake(address, amount, fee, nonce)
+            })
+            .await?;
+        }
+
+        Commands::Unjail { from, fee } => {
+            submit_signed(&cli.rpc, &wallet_dir, &from, "Unjail", |address, nonce| {
+                Transaction::unjail(address, fee, nonce)
+            })
+            .await?;
+        }
+
+        Commands::Faucet { address } => {
+            let addr = match find_wallet(&wallet_dir, &address) {
+                Ok(w) => w.address,
+                Err(_) => address,
+            };
+            match rpc_call(&cli.rpc, RpcRequest::FaucetTokens { address: addr }).await? {
+                RpcResponse::Success { data } => {
+                    println!(
+                        "{}",
+                        data["message"].as_str().unwrap_or("Faucet request sent")
+                    );
+                    println!(
+                        "   TX Hash: {}",
+                        data["tx_hash"].as_str().unwrap_or("unknown")
+                    );
+                }
+                RpcResponse::Error { message } => println!("Faucet error: {}", message),
+            }
+        }
+
+        Commands::Validators => match rpc_call(&cli.rpc, RpcRequest::GetValidators).await? {
+            RpcResponse::Success { data } => {
+                println!(
+                    "{:<42} {:>8} {:>6} {:>7} {:>6} {:>8} {:>10} {:>7} {:>7}",
+                    "ADDRESS",
+                    "STAKE",
+                    "POI%",
+                    "UPTIME%",
+                    "ATTST",
+                    "RTT(ms)",
+                    "THRU(kbps)",
+                    "BLOCKS",
+                    "MISSED"
+                );
+                for v in data.as_array().cloned().unwrap_or_default() {
+                    let opt = |k: &str| {
+                        v[k].as_u64()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    };
+                    let jailed = v["jailed"].as_bool().unwrap_or(false);
+                    println!(
+                        "{:<42} {:>8} {:>6.1} {:>7.1} {:>6} {:>8} {:>10} {:>7} {:>7}{}",
+                        v["address"].as_str().unwrap_or(""),
+                        v["stake"].as_u64().unwrap_or(0),
+                        v["poi_bps"].as_u64().unwrap_or(0) as f64 / 100.0,
+                        v["uptime_bps"].as_u64().unwrap_or(0) as f64 / 100.0,
+                        v["attestations"].as_u64().unwrap_or(0),
+                        opt("median_rtt_ms"),
+                        opt("median_throughput_kbps"),
+                        v["blocks_produced"].as_u64().unwrap_or(0),
+                        v["slots_missed"].as_u64().unwrap_or(0),
+                        if jailed { "  JAILED" } else { "" },
+                    );
+                }
+            }
+            RpcResponse::Error { message } => println!("Error: {}", message),
+        },
 
         Commands::Status => {
             println!("Fetching blockchain status...\n");

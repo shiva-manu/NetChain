@@ -25,7 +25,8 @@ tokio = { version = "1.36", features = [
     "sync",
     "time",
     "net",
-    "io-util"
+    "io-util",
+    "signal"
 ] }
 
 # Serialization
@@ -53,7 +54,7 @@ bincode = { version = "2.0", features = ["serde"] }
 zeroize = "1.8"
 
 # Random
-rand = "0.9"
+rand = "0.8"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -86,7 +87,11 @@ libp2p = { version = "0.56", features = [
     "yamux",
     "gossipsub",
     "kad",
-    "macros"
+    "macros",
+    "ping",
+    "identify",
+    "request-response",
+    "json"
 ] }
 
 [dev-dependencies]

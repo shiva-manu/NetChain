@@ -18,6 +18,6 @@ COPY --from=builder /app/target/release/netchain-wallet /usr/local/bin/netchain-
 COPY config ./config
 
 ENV NETCHAIN_CONFIG=/app/config/default.toml
-EXPOSE 30333 8545 9090
+EXPOSE 30333 8545 8546 9090
 
 CMD ["netchain"]

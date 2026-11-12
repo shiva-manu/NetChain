@@ -10,6 +10,8 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
+use crate::state::StateEvent;
+
 const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024; // 256 KiB
 const MAX_WS_FRAME_BYTES: usize = 64 * 1024; // 64 KiB
 
@@ -307,6 +309,113 @@ async fn handle_ws_connection(
                 }
             }
         }
+    }
+}
+
+/// Convert a chain state event into the WebSocket event broadcast to subscribers.
+pub fn from_state_event(event: &StateEvent) -> WsEvent {
+    match event {
+        StateEvent::ProposalCreated {
+            proposal_id,
+            title,
+            proposer: _,
+        } => WsEvent::ProposalUpdate {
+            proposal_id: *proposal_id,
+            title: title.clone(),
+            status: "Created".to_string(),
+            yes_votes: 0,
+            no_votes: 0,
+        },
+        StateEvent::VoteCast {
+            proposal_id,
+            title,
+            voter: _,
+            support: _,
+            yes_votes,
+            no_votes,
+        } => WsEvent::ProposalUpdate {
+            proposal_id: *proposal_id,
+            title: title.clone(),
+            status: "VoteReceived".to_string(),
+            yes_votes: *yes_votes,
+            no_votes: *no_votes,
+        },
+        StateEvent::ContractDeployed {
+            contract_address,
+            deployer,
+        } => WsEvent::ContractDeployed {
+            contract_address: contract_address.clone(),
+            deployer: deployer.clone(),
+            code_hash: String::new(),
+        },
+        StateEvent::ContractCalled {
+            contract_address,
+            caller,
+            function,
+            gas_used,
+        } => WsEvent::ContractCalled {
+            contract_address: contract_address.clone(),
+            caller: caller.clone(),
+            function: function.clone(),
+            gas_used: *gas_used,
+        },
+        StateEvent::TokenCreated {
+            token_id,
+            creator,
+            name,
+            symbol,
+        } => WsEvent::TokenCreated {
+            token_id: token_id.clone(),
+            creator: creator.clone(),
+            name: name.clone(),
+            symbol: symbol.clone(),
+        },
+        StateEvent::TokenMinted {
+            token_id,
+            to,
+            amount,
+        } => WsEvent::TokenMinted {
+            token_id: token_id.clone(),
+            to: to.clone(),
+            amount: *amount,
+        },
+        StateEvent::TokenTransferred {
+            token_id,
+            from,
+            to,
+            amount,
+        } => WsEvent::TokenTransferred {
+            token_id: token_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            amount: *amount,
+        },
+        StateEvent::TokenBurned {
+            token_id,
+            from: _,
+            amount,
+        } => WsEvent::TokenBurned {
+            token_id: token_id.clone(),
+            amount: *amount,
+        },
+        StateEvent::NftCreated {
+            nft_id,
+            collection_id,
+            owner,
+        } => WsEvent::NftCreated {
+            nft_id: nft_id.clone(),
+            collection_id: collection_id.clone(),
+            creator: owner.clone(),
+            name: String::new(),
+        },
+        StateEvent::NftTransferred { nft_id, from, to } => WsEvent::NftTransferred {
+            nft_id: nft_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        StateEvent::NftBurned { nft_id, owner: _ } => WsEvent::NftBurned {
+            nft_id: nft_id.clone(),
+        },
     }
 }
 
