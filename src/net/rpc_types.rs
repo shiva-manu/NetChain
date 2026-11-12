@@ -49,6 +49,10 @@ pub enum RpcRequest {
     GetNft { nft_id: String },
     #[serde(rename = "get_nft_owner")]
     GetNftOwner { nft_id: String },
+    #[serde(rename = "get_validators")]
+    GetValidators,
+    #[serde(rename = "get_node_info")]
+    GetNodeInfo,
 }
 
 /// RPC Response types

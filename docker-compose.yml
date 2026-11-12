@@ -9,10 +9,15 @@ services:
       - "30333:30333"
       - "8545:8545"
       - "9090:9090"
+      - "8546:8546"
     environment:
       NETCHAIN_CONFIG: /app/config/default.toml
       NETCHAIN_RPC_BIND_ADDR: 0.0.0.0
       NETCHAIN_MONITORING_BIND_ADDR: 0.0.0.0
+      NETCHAIN_WS_BIND_ADDR: 0.0.0.0
+      # To join an existing network instead of starting a private dev chain:
+      # NETCHAIN_GENESIS: /app/config/genesis.json
+      # NETCHAIN_BOOTNODES: /ip4/<BOOTNODE_IP>/tcp/30333
       NETCHAIN_LOG_LEVEL: info
       DATA_DIR: /app/data
       PORT: 30333

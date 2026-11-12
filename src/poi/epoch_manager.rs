@@ -7,6 +7,7 @@ use crate::consensus::{HybridWeights, NodeMetrics, PoiConfig, PoiScorer, Thresho
 use crate::state::{ChainParams, SlashReason, SlashRecord, State};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -86,11 +87,11 @@ pub struct ValidatorPerformance {
 pub struct EpochManager {
     config: EpochConfig,
     /// Current epoch number
-    current_epoch: u64,
+    current_epoch: AtomicU64,
     /// Block height at start of current epoch
-    epoch_start_block: u64,
+    epoch_start_block: AtomicU64,
     /// Timestamp of epoch start
-    epoch_start_timestamp: u64,
+    epoch_start_timestamp: AtomicU64,
     /// Historical epoch snapshots
     epoch_history: Arc<RwLock<VecDeque<EpochSnapshot>>>,
     /// Current epoch validator performance
@@ -110,9 +111,9 @@ impl EpochManager {
 
         Self {
             config,
-            current_epoch: 0,
-            epoch_start_block: 0,
-            epoch_start_timestamp: 0,
+            current_epoch: AtomicU64::new(0),
+            epoch_start_block: AtomicU64::new(0),
+            epoch_start_timestamp: AtomicU64::new(0),
             epoch_history: Arc::new(RwLock::new(VecDeque::with_capacity(history_epochs + 1))),
             validator_performance: Arc::new(RwLock::new(HashMap::new())),
             active_validators: Arc::new(RwLock::new(active_validators)),
@@ -123,22 +124,15 @@ impl EpochManager {
 
     /// Initialize epoch manager with timestamp
     pub async fn initialize(&self, start_block: u64, start_timestamp: u64) {
-        let mut start_block_guard = self.epoch_start_block as u64;
-        start_block_guard = start_block;
-        let mut start_ts_guard = self.epoch_start_timestamp;
-        start_ts_guard = start_timestamp;
-
-        // Use interior mutability through the struct fields
-        unsafe {
-            let self_mut = self as *const EpochManager as *mut EpochManager;
-            (*self_mut).epoch_start_block = start_block;
-            (*self_mut).epoch_start_timestamp = start_timestamp;
-        }
+        self.epoch_start_block.store(start_block, Ordering::SeqCst);
+        self.epoch_start_timestamp
+            .store(start_timestamp, Ordering::SeqCst);
     }
 
     /// Check if we should start a new epoch
     pub fn should_start_new_epoch(&self, current_block: u64) -> bool {
-        current_block >= self.epoch_start_block + self.config.blocks_per_epoch
+        current_block
+            >= self.epoch_start_block.load(Ordering::SeqCst) + self.config.blocks_per_epoch
     }
 
     /// Record that a validator produced a block
@@ -278,7 +272,7 @@ impl EpochManager {
         state: &mut State,
     ) -> EpochSnapshot {
         info!(
-            epoch = self.current_epoch,
+            epoch = self.current_epoch.load(Ordering::SeqCst),
             end_block = end_block,
             "ending epoch"
         );
@@ -292,10 +286,10 @@ impl EpochManager {
 
         // Create snapshot
         let snapshot = EpochSnapshot {
-            epoch_number: self.current_epoch,
-            start_block: self.epoch_start_block,
+            epoch_number: self.current_epoch.load(Ordering::SeqCst),
+            start_block: self.epoch_start_block.load(Ordering::SeqCst),
             end_block,
-            start_timestamp: self.epoch_start_timestamp,
+            start_timestamp: self.epoch_start_timestamp.load(Ordering::SeqCst),
             end_timestamp,
             active_validators: self
                 .active_validators
@@ -306,9 +300,11 @@ impl EpochManager {
                 .collect(),
             active_producers: producers.clone(),
             validator_scores: scores.clone(),
-            total_blocks: end_block - self.epoch_start_block,
+            total_blocks: end_block - self.epoch_start_block.load(Ordering::SeqCst),
             total_transactions: performance.values().map(|p| p.transactions_processed).sum(),
         };
+        // Release the read guard: the reset below takes a write lock on the same data.
+        drop(performance);
 
         // Apply rewards and penalties
         self.apply_epoch_rewards(&snapshot, metrics, state).await;
@@ -353,16 +349,15 @@ impl EpochManager {
         }
 
         // Start new epoch
-        unsafe {
-            let self_mut = self as *const EpochManager as *mut EpochManager;
-            (*self_mut).current_epoch += 1;
-            (*self_mut).epoch_start_block = end_block + 1;
-            (*self_mut).epoch_start_timestamp = end_timestamp;
-        }
+        self.current_epoch.fetch_add(1, Ordering::SeqCst);
+        self.epoch_start_block
+            .store(end_block + 1, Ordering::SeqCst);
+        self.epoch_start_timestamp
+            .store(end_timestamp, Ordering::SeqCst);
 
         info!(
-            epoch = self.current_epoch,
-            start_block = self.epoch_start_block,
+            epoch = self.current_epoch.load(Ordering::SeqCst),
+            start_block = self.epoch_start_block.load(Ordering::SeqCst),
             "started new epoch"
         );
 
@@ -548,12 +543,13 @@ impl EpochManager {
 
     /// Get current epoch number
     pub fn current_epoch(&self) -> u64 {
-        self.current_epoch
+        self.current_epoch.load(Ordering::SeqCst)
     }
 
     /// Get blocks remaining in current epoch
     pub fn blocks_remaining(&self, current_block: u64) -> u64 {
-        let epoch_end = self.epoch_start_block + self.config.blocks_per_epoch;
+        let epoch_end =
+            self.epoch_start_block.load(Ordering::SeqCst) + self.config.blocks_per_epoch;
         if current_block >= epoch_end {
             0
         } else {
@@ -563,7 +559,8 @@ impl EpochManager {
 
     /// Get epoch progress as percentage
     pub fn epoch_progress(&self, current_block: u64) -> f64 {
-        let blocks_done = current_block.saturating_sub(self.epoch_start_block);
+        let blocks_done =
+            current_block.saturating_sub(self.epoch_start_block.load(Ordering::SeqCst));
         (blocks_done as f64 / self.config.blocks_per_epoch as f64).clamp(0.0, 1.0)
     }
 
@@ -703,6 +700,6 @@ mod tests {
 
         assert_eq!(snapshot.epoch_number, 0);
         assert_eq!(manager.current_epoch(), 1);
-        assert_eq!(manager.epoch_start_block, 11);
+        assert_eq!(manager.epoch_start_block.load(Ordering::SeqCst), 11);
     }
 }

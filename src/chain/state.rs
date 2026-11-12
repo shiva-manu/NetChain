@@ -4,7 +4,7 @@ use crate::contract::{code_hash, derive_contract_address, ContractInfo};
 use crate::token::{derive_nft_id, derive_token_id, NftInfo, TokenInfo, TokenRegistry};
 use crate::transaction::{ProposalAction, SignedTransaction, Transaction, TransactionType};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
@@ -35,10 +35,20 @@ pub enum StateError {
     NftNotFound,
     NotTokenCreator,
     NftNotOwner,
+    /// Sender is not an active validator (stake below `min_validator_stake`).
+    NotAValidator,
+    /// Metric attestation is malformed (self-attestation, unknown subject, out of range).
+    InvalidAttestation,
+    /// Arithmetic overflow while computing amounts.
+    Overflow,
+    /// The transaction would leave the network without any active validator.
+    WouldRemoveLastValidator,
+    /// Unjail sent by a validator that is not jailed.
+    NotJailed,
 }
 
 /// Account state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Account {
     pub balance: u64,
     pub nonce: u64,
@@ -73,6 +83,12 @@ pub struct ChainParams {
     pub proposal_approval_bps: u64,
     /// Minimum stake required to create a proposal.
     pub min_proposal_stake: u64,
+    /// Minimum bonded stake for an address to be in the active validator set.
+    pub min_validator_stake: u64,
+    /// Attestations from distinct validators needed before measured PoI replaces the default.
+    pub min_attestations: usize,
+    /// Attestations older than this (seconds of chain time) are ignored.
+    pub attestation_max_age_secs: u64,
 }
 
 impl Default for ChainParams {
@@ -85,9 +101,61 @@ impl Default for ChainParams {
             proposal_quorum_bps: 2_000,
             proposal_approval_bps: 5_001,
             min_proposal_stake: 100,
+            min_validator_stake: 100,
+            min_attestations: 2,
+            attestation_max_age_secs: 3_600,
         }
     }
 }
+
+/// On-chain liveness record of a validator, maintained by the consensus engine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorStats {
+    /// Blocks produced in own slot.
+    pub produced: u64,
+    /// Own slots that stayed empty.
+    pub missed: u64,
+    /// Exponentially weighted uptime in basis points.
+    pub uptime_bps: u64,
+    /// Slot of the last produced block.
+    pub last_slot: u64,
+    /// Removed from the active set for missing too many slots, until it sends `Unjail`.
+    #[serde(default)]
+    pub jailed: bool,
+}
+
+impl ValidatorStats {
+    pub fn new() -> Self {
+        Self {
+            produced: 0,
+            missed: 0,
+            uptime_bps: crate::engine::INITIAL_UPTIME_BPS,
+            last_slot: 0,
+            jailed: false,
+        }
+    }
+}
+
+impl Default for ValidatorStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A network measurement of one validator, made by another validator and recorded on-chain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetricAttestation {
+    /// Measured round-trip time in milliseconds.
+    pub rtt_ms: u64,
+    /// Measured throughput in kilobits per second.
+    pub throughput_kbps: u64,
+    /// Chain time (block timestamp) when the attestation was included.
+    pub at: u64,
+}
+
+/// Bounds for attested metrics.
+pub const MAX_ATTESTED_RTT_MS: u64 = 60_000;
+pub const MAX_ATTESTED_THROUGHPUT_KBPS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernanceProposal {
@@ -300,6 +368,12 @@ pub struct State {
     /// Token registry for fungible and non-fungible tokens
     #[serde(default)]
     pub token_registry: TokenRegistry,
+    /// Liveness stats per validator address.
+    #[serde(default)]
+    pub validator_stats: BTreeMap<String, ValidatorStats>,
+    /// subject validator -> attesting validator -> latest attestation.
+    #[serde(default)]
+    pub metric_attestations: BTreeMap<String, BTreeMap<String, MetricAttestation>>,
 }
 
 impl State {
@@ -316,6 +390,8 @@ impl State {
             contracts: HashMap::new(),
             contract_storage: HashMap::new(),
             token_registry: TokenRegistry::new(),
+            validator_stats: BTreeMap::new(),
+            metric_attestations: BTreeMap::new(),
         }
     }
 
@@ -336,6 +412,8 @@ impl State {
             contracts: HashMap::new(),
             contract_storage: HashMap::new(),
             token_registry: TokenRegistry::new(),
+            validator_stats: BTreeMap::new(),
+            metric_attestations: BTreeMap::new(),
         }
     }
 
@@ -352,6 +430,8 @@ impl State {
             contracts: HashMap::new(),
             contract_storage: HashMap::new(),
             token_registry: TokenRegistry::new(),
+            validator_stats: BTreeMap::new(),
+            metric_attestations: BTreeMap::new(),
         }
     }
 
@@ -430,12 +510,43 @@ impl State {
         }
 
         // balance check (amount + fee)
-        let required = t.amount + t.fee;
+        let required = t.amount.checked_add(t.fee).ok_or(StateError::Overflow)?;
         if sender.balance < required {
             return Err(StateError::InsufficientBalance);
         }
 
         match &t.tx_type {
+            TransactionType::AttestMetrics {
+                subject,
+                rtt_ms,
+                throughput_kbps,
+            } => {
+                if t.amount != 0 {
+                    return Err(StateError::InvalidAttestation);
+                }
+                if !self.is_active_validator(&t.sender) {
+                    return Err(StateError::NotAValidator);
+                }
+                if subject == &t.sender || !self.is_active_validator(subject) {
+                    return Err(StateError::InvalidAttestation);
+                }
+                if *rtt_ms > MAX_ATTESTED_RTT_MS || *throughput_kbps > MAX_ATTESTED_THROUGHPUT_KBPS
+                {
+                    return Err(StateError::InvalidAttestation);
+                }
+            }
+            TransactionType::Unjail => {
+                if t.amount != 0 {
+                    return Err(StateError::ZeroAmount);
+                }
+                if self.get_staked_balance(&t.sender) < self.chain_params.min_validator_stake.max(1)
+                {
+                    return Err(StateError::NotAValidator);
+                }
+                if !self.is_jailed(&t.sender) {
+                    return Err(StateError::NotJailed);
+                }
+            }
             TransactionType::Transfer => {
                 if t.amount == 0 {
                     return Err(StateError::ZeroAmount);
@@ -453,8 +564,20 @@ impl State {
                 if t.amount == 0 {
                     return Err(StateError::ZeroAmount);
                 }
-                if self.get_staked_balance(&t.sender) < t.amount {
+                let staked = self.get_staked_balance(&t.sender);
+                if staked < t.amount {
                     return Err(StateError::InsufficientStake);
+                }
+                // Never let the active validator set become empty: the chain would halt forever.
+                let min = self.chain_params.min_validator_stake.max(1);
+                if staked >= min && staked - t.amount < min {
+                    let others_active = self
+                        .stakes
+                        .keys()
+                        .any(|addr| addr != &t.sender && self.is_active_validator(addr));
+                    if !others_active {
+                        return Err(StateError::WouldRemoveLastValidator);
+                    }
                 }
             }
             TransactionType::CreateProposal {
@@ -506,7 +629,11 @@ impl State {
                 }
                 // Check deployer can pay gas cost
                 let gas_cost = *gas_limit; // 1:1 gas to token ratio
-                let required = gas_cost + t.fee;
+                let required = t
+                    .amount
+                    .checked_add(gas_cost)
+                    .and_then(|v| v.checked_add(t.fee))
+                    .ok_or(StateError::Overflow)?;
                 if sender.balance < required {
                     return Err(StateError::InsufficientBalance);
                 }
@@ -526,7 +653,11 @@ impl State {
                     return Err(StateError::ZeroAmount);
                 }
                 let gas_cost = *gas_limit;
-                let required = t.amount + gas_cost + t.fee;
+                let required = t
+                    .amount
+                    .checked_add(gas_cost)
+                    .and_then(|v| v.checked_add(t.fee))
+                    .ok_or(StateError::Overflow)?;
                 if sender.balance < required {
                     return Err(StateError::InsufficientBalance);
                 }
@@ -555,8 +686,12 @@ impl State {
                 if token.creator != t.sender {
                     return Err(StateError::NotTokenCreator);
                 }
+                let new_supply = token
+                    .total_supply
+                    .checked_add(*amount)
+                    .ok_or(StateError::MaxSupplyReached)?;
                 if let Some(max) = token.max_supply {
-                    if token.total_supply + amount > max {
+                    if new_supply > max {
                         return Err(StateError::MaxSupplyReached);
                     }
                 }
@@ -688,12 +823,36 @@ impl State {
         sender.nonce += 1;
 
         let event = match &t.tx_type {
+            TransactionType::AttestMetrics {
+                subject,
+                rtt_ms,
+                throughput_kbps,
+            } => {
+                self.metric_attestations
+                    .entry(subject.clone())
+                    .or_default()
+                    .insert(
+                        t.sender.clone(),
+                        MetricAttestation {
+                            rtt_ms: *rtt_ms,
+                            throughput_kbps: *throughput_kbps,
+                            at: now,
+                        },
+                    );
+                None
+            }
+            TransactionType::Unjail => {
+                let stats = self.validator_stats.entry(t.sender.clone()).or_default();
+                stats.jailed = false;
+                stats.uptime_bps = crate::engine::INITIAL_UPTIME_BPS;
+                None
+            }
             TransactionType::Transfer => {
                 let receiver = self
                     .accounts
                     .entry(t.receiver.clone())
                     .or_insert(Account::new(0));
-                receiver.balance += t.amount;
+                receiver.balance = receiver.balance.saturating_add(t.amount);
                 None
             }
             TransactionType::Stake => {
@@ -1058,15 +1217,17 @@ impl State {
         transactions: &[SignedTransaction],
         block_reward: u64,
     ) {
-        let total_fees: u64 = transactions.iter().map(|tx| tx.tx.fee).sum();
-        let total_reward = total_fees + block_reward;
+        let total_fees: u64 = transactions
+            .iter()
+            .fold(0u64, |acc, tx| acc.saturating_add(tx.tx.fee));
+        let total_reward = total_fees.saturating_add(block_reward);
 
         if total_reward > 0 {
             let validator = self
                 .accounts
                 .entry(validator_address.to_string())
                 .or_insert(Account::new(0));
-            validator.balance += total_reward;
+            validator.balance = validator.balance.saturating_add(total_reward);
         }
     }
 
@@ -1164,6 +1325,9 @@ impl State {
                 }
             })
             .collect();
+        // HashMap iteration order differs between nodes; execute in proposal-id order.
+        let mut proposals_to_execute = proposals_to_execute;
+        proposals_to_execute.sort_by_key(|p| p.proposal_id);
 
         // Execute each proposal
         for executed in &proposals_to_execute {
@@ -1207,6 +1371,36 @@ impl State {
         }
 
         executed_proposals
+    }
+}
+
+impl State {
+    /// Whether `address` is in the active validator set (bonded enough and not jailed).
+    pub fn is_active_validator(&self, address: &str) -> bool {
+        self.get_staked_balance(address) >= self.chain_params.min_validator_stake.max(1)
+            && !self.validator_stats.get(address).is_some_and(|s| s.jailed)
+    }
+
+    pub fn is_jailed(&self, address: &str) -> bool {
+        self.validator_stats.get(address).is_some_and(|s| s.jailed)
+    }
+
+    /// Validate `tx` as if `pending` (earlier transactions from the same sender, in nonce
+    /// order) had already been applied. Lets a sender queue several transactions per block.
+    pub fn validate_after_pending(
+        &self,
+        pending: &[&SignedTransaction],
+        tx: &SignedTransaction,
+        now: u64,
+    ) -> Result<(), StateError> {
+        if pending.is_empty() {
+            return self.validate_transaction_at(tx, now);
+        }
+        let mut scratch = self.clone();
+        for p in pending {
+            scratch.apply_transaction_at(p, now)?;
+        }
+        scratch.validate_transaction_at(tx, now)
     }
 }
 

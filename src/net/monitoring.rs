@@ -15,64 +15,93 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::blockchain::Blockchain;
+use crate::engine::{self, ValidatorScore};
 use crate::measurement::MeasurementService;
 use crate::mempool::Mempool;
-use crate::metrics_aggregator::MetricsAggregator;
 use crate::p2p::P2PSharedState;
-use crate::producer::BlockProducer;
 use crate::state::State;
+
+/// Blocks per informational "epoch" reported by the dashboard.
+const EPOCH_LENGTH: u64 = 100;
 
 pub struct MonitoringState {
     pub blockchain: Arc<Mutex<Blockchain>>,
     pub mempool: Arc<Mutex<Mempool>>,
     pub p2p_shared: Arc<P2PSharedState>,
-    pub producer: Arc<Mutex<BlockProducer>>,
-    pub aggregator: Arc<Mutex<MetricsAggregator>>,
     pub measurement: Arc<MeasurementService>,
     pub state: Arc<Mutex<State>>,
     pub started_at: Instant,
+    pub chain_id: String,
+    pub node_address: String,
+    pub peer_id: String,
 }
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
     consensus_mode: &'static str,
+    chain_id: String,
+    node_address: String,
+    peer_id: String,
+    is_validator: bool,
     uptime_secs: u64,
     chain_height: u64,
+    latest_block_age_secs: i64,
     mempool_size: usize,
     peer_count: usize,
+    /// Active validators (stake >= min_validator_stake).
     validator_count: usize,
+    /// Active validators with enough recent on-chain PoI attestations.
     verified_validator_count: usize,
     unverified_validator_count: usize,
     aggregator_nodes: usize,
     current_epoch: u64,
     slashed_validator_count: usize,
+    /// Average on-chain uptime score (0..1).
     average_reputation: f64,
+    /// Average on-chain PoI score (0..1).
     average_identity_score: f64,
 }
 
+async fn validator_snapshot(state: &MonitoringState) -> Vec<ValidatorScore> {
+    let tip_time = state
+        .blockchain
+        .lock()
+        .await
+        .last_block()
+        .timestamp
+        .timestamp();
+    let state_guard = state.state.lock().await;
+    engine::validator_scores(&state_guard, tip_time.max(0) as u64)
+}
+
 async fn health_snapshot(state: &MonitoringState) -> HealthResponse {
-    let chain_height = state.blockchain.lock().await.height();
+    let (chain_height, latest_block_age_secs) = {
+        let bc = state.blockchain.lock().await;
+        let age = chrono::Utc::now().timestamp() - bc.last_block().timestamp.timestamp();
+        (bc.height(), age)
+    };
     let mempool_size = state.mempool.lock().await.len();
     let peer_count = state.p2p_shared.get_peer_count();
-    let validator_count = state.producer.lock().await.validator_count();
-    let (aggregator_nodes, current_epoch) = {
-        let aggregator = state.aggregator.lock().await;
-        (aggregator.node_count(), aggregator.current_epoch())
-    };
-    let (
-        verified_validator_count,
-        unverified_validator_count,
-        average_reputation,
-        average_identity_score,
-    ) = {
-        let aggregator = state.aggregator.lock().await;
-        (
-            aggregator.verified_node_count(),
-            aggregator.get_unverified_nodes().len(),
-            aggregator.average_reputation(),
-            aggregator.average_identity_score(),
-        )
+    let validators = validator_snapshot(state).await;
+    let min_attestations = state
+        .state
+        .lock()
+        .await
+        .chain_params
+        .min_attestations
+        .max(1);
+    let verified = validators
+        .iter()
+        .filter(|v| v.attestations >= min_attestations)
+        .count();
+    let avg = |f: &dyn Fn(&ValidatorScore) -> u64| {
+        if validators.is_empty() {
+            0.0
+        } else {
+            validators.iter().map(|v| f(v) as f64).sum::<f64>()
+                / (validators.len() as f64 * engine::BPS as f64)
+        }
     };
     let slashed_validator_count = {
         let state_guard = state.state.lock().await;
@@ -85,20 +114,29 @@ async fn health_snapshot(state: &MonitoringState) -> HealthResponse {
     };
 
     HealthResponse {
-        status: "ok",
-        consensus_mode: "hybrid",
+        status: if latest_block_age_secs < 300 {
+            "ok"
+        } else {
+            "stalled"
+        },
+        consensus_mode: "hybrid-poi",
+        chain_id: state.chain_id.clone(),
+        node_address: state.node_address.clone(),
+        peer_id: state.peer_id.clone(),
+        is_validator: validators.iter().any(|v| v.address == state.node_address),
         uptime_secs: state.started_at.elapsed().as_secs(),
         chain_height,
+        latest_block_age_secs,
         mempool_size,
         peer_count,
-        validator_count,
-        verified_validator_count,
-        unverified_validator_count,
-        aggregator_nodes,
-        current_epoch,
+        validator_count: validators.len(),
+        verified_validator_count: verified,
+        unverified_validator_count: validators.len() - verified,
+        aggregator_nodes: peer_count + 1,
+        current_epoch: chain_height / EPOCH_LENGTH,
         slashed_validator_count,
-        average_reputation,
-        average_identity_score,
+        average_reputation: avg(&|v| v.uptime_bps),
+        average_identity_score: avg(&|v| v.poi_bps),
     }
 }
 
@@ -120,6 +158,21 @@ async fn handle_request(
         (&Method::GET, "/health") => {
             let snapshot = health_snapshot(&state).await;
             let body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+            Ok(response(StatusCode::OK, "application/json", body))
+        }
+        (&Method::GET, "/validators") => {
+            let tip_time = state
+                .blockchain
+                .lock()
+                .await
+                .last_block()
+                .timestamp
+                .timestamp();
+            let validators = {
+                let state_guard = state.state.lock().await;
+                engine::validator_report(&state_guard, tip_time.max(0) as u64)
+            };
+            let body = serde_json::to_string(&validators).unwrap_or_else(|_| "[]".to_string());
             Ok(response(StatusCode::OK, "application/json", body))
         }
         (&Method::GET, "/metrics") => {

@@ -2,12 +2,16 @@
 //! Block structure with Merkle root commitment over transactions
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::transaction::SignedTransaction;
+use crate::transaction::{pubkey_to_address_hex, SignedTransaction};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Proposer name used by the genesis block (which is not signed).
+pub const GENESIS_VALIDATOR: &str = "genesis";
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub index: u64,
     pub timestamp: DateTime<Utc>,
@@ -15,56 +19,58 @@ pub struct Block {
     pub merkle_root: String,
     /// The transactions included in this block.
     pub transactions: Vec<SignedTransaction>,
-    /// Validator/producer address that created this block.
+    /// On-chain address of the proposer (hex(SHA-256(pubkey)[0..20])).
     pub validator: String,
-    /// VRF proof: validator's Ed25519 signature of the previous block hash (hex-encoded).
-    /// This makes validator selection unpredictable until the block is published.
-    pub vrf_proof: String,
+    /// Proposer's Ed25519 public key (hex). Must hash to `validator`.
+    #[serde(default)]
+    pub proposer_pubkey: String,
+    /// For block 0: SHA-256 of the genesis spec. Otherwise the parent block hash.
     pub previous_hash: String,
     pub hash: String,
+    /// Proposer's Ed25519 signature over `hash` (hex).
+    #[serde(default)]
+    pub signature: String,
 }
 
 impl Block {
-    /// Create a new block with structured transactions and Merkle root.
+    /// Genesis block committing to the genesis spec hash.
+    pub fn genesis(spec_hash: String, timestamp: DateTime<Utc>) -> Self {
+        Self::new_unsigned(
+            0,
+            Vec::new(),
+            spec_hash,
+            GENESIS_VALIDATOR.to_string(),
+            timestamp,
+        )
+    }
+
+    /// Create an unsigned block (genesis and tests only; the network rejects unsigned blocks).
     pub fn new(
         index: u64,
         transactions: Vec<SignedTransaction>,
         previous_hash: String,
         validator: String,
     ) -> Self {
-        Self::new_at(
-            index,
-            transactions,
-            previous_hash,
-            validator,
-            Utc::now(),
-            String::new(),
-        )
+        Self::new_unsigned(index, transactions, previous_hash, validator, Utc::now())
     }
 
-    /// Create a new block at a specific timestamp.
-    ///
-    /// This is useful for deterministic block processing where transaction validation
-    /// must use the same "now" as the block timestamp.
-    ///
-    /// The `vrf_proof` is the validator's Ed25519 signature of the previous block hash,
-    /// used to make validator selection unpredictable (VRF-enhanced consensus).
-    pub fn new_at(
+    /// Create an unsigned block at a specific timestamp.
+    pub fn new_unsigned(
         index: u64,
         transactions: Vec<SignedTransaction>,
         previous_hash: String,
         validator: String,
         timestamp: DateTime<Utc>,
-        vrf_proof: String,
     ) -> Self {
         let merkle_root = compute_merkle_root(&transactions);
         let hash = Self::calculate_hash(
             index,
             &timestamp,
             &merkle_root,
+            transactions.len(),
             &previous_hash,
             &validator,
-            &vrf_proof,
+            "",
         );
         Self {
             index,
@@ -72,28 +78,67 @@ impl Block {
             merkle_root,
             transactions,
             validator,
-            vrf_proof,
+            proposer_pubkey: String::new(),
             previous_hash,
             hash,
+            signature: String::new(),
         }
     }
 
-    /// Recalculate block hash from header fields (does NOT include raw tx data, only merkle root).
+    /// Create a block signed by `key`; the proposer address is derived from the key.
+    pub fn new_signed(
+        index: u64,
+        transactions: Vec<SignedTransaction>,
+        previous_hash: String,
+        timestamp: DateTime<Utc>,
+        key: &SigningKey,
+    ) -> Self {
+        let verifying = key.verifying_key();
+        let validator = pubkey_to_address_hex(&verifying);
+        let proposer_pubkey = hex::encode(verifying.to_bytes());
+        let merkle_root = compute_merkle_root(&transactions);
+        let hash = Self::calculate_hash(
+            index,
+            &timestamp,
+            &merkle_root,
+            transactions.len(),
+            &previous_hash,
+            &validator,
+            &proposer_pubkey,
+        );
+        let signature = hex::encode(key.sign(hash.as_bytes()).to_bytes());
+        Self {
+            index,
+            timestamp,
+            merkle_root,
+            transactions,
+            validator,
+            proposer_pubkey,
+            previous_hash,
+            hash,
+            signature,
+        }
+    }
+
+    /// Hash of the header fields. Transactions are committed via the Merkle root and count
+    /// (the count prevents the duplicated-last-leaf Merkle mutation).
     pub fn calculate_hash(
         index: u64,
         timestamp: &DateTime<Utc>,
         merkle_root: &str,
+        tx_count: usize,
         previous_hash: &str,
         validator: &str,
-        vrf_proof: &str,
+        proposer_pubkey: &str,
     ) -> String {
         let payload = serde_json::json!({
             "index": index,
             "timestamp": timestamp.to_rfc3339(),
             "merkle_root": merkle_root,
+            "tx_count": tx_count,
             "previous_hash": previous_hash,
             "validator": validator,
-            "vrf_proof": vrf_proof,
+            "proposer_pubkey": proposer_pubkey,
         })
         .to_string();
 
@@ -102,42 +147,44 @@ impl Block {
         format!("{:x}", hasher.finalize())
     }
 
+    /// Recompute this block's hash from its header fields.
+    pub fn compute_hash(&self) -> String {
+        Self::calculate_hash(
+            self.index,
+            &self.timestamp,
+            &self.merkle_root,
+            self.transactions.len(),
+            &self.previous_hash,
+            &self.validator,
+            &self.proposer_pubkey,
+        )
+    }
+
     /// Verify that the merkle_root matches the actual transactions in this block.
     pub fn verify_merkle_root(&self) -> bool {
         let computed = compute_merkle_root(&self.transactions);
         computed == self.merkle_root
     }
 
-    /// Verify the VRF proof: check that the validator signed the previous block hash.
-    /// Returns true if the proof is valid or if VRF is not enabled (empty proof).
-    pub fn verify_vrf_proof(&self) -> bool {
-        if self.vrf_proof.is_empty() {
-            return true; // Backward compatibility: blocks without VRF proof are valid
+    /// Verify the proposer signature: the public key must derive `validator` and must have
+    /// signed this block's hash.
+    pub fn verify_signature(&self) -> Result<(), String> {
+        let pubkey_bytes: [u8; 32] = hex::decode(&self.proposer_pubkey)
+            .map_err(|_| "proposer_pubkey is not hex".to_string())?
+            .try_into()
+            .map_err(|_| "proposer_pubkey must be 32 bytes".to_string())?;
+        let verifying = VerifyingKey::from_bytes(&pubkey_bytes)
+            .map_err(|e| format!("invalid proposer_pubkey: {e}"))?;
+        if pubkey_to_address_hex(&verifying) != self.validator {
+            return Err("proposer_pubkey does not match validator address".into());
         }
-
-        let proof_bytes = match hex::decode(&self.vrf_proof) {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
-
-        let pubkey_bytes = match hex::decode(&self.validator) {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
-
-        let verifying_key = match ed25519_dalek::VerifyingKey::try_from(pubkey_bytes.as_slice()) {
-            Ok(k) => k,
-            Err(_) => return false,
-        };
-
-        let signature = match ed25519_dalek::Signature::try_from(proof_bytes.as_slice()) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-
-        verifying_key
-            .verify_strict(&self.previous_hash.as_bytes(), &signature)
-            .is_ok()
+        let sig_bytes: [u8; 64] = hex::decode(&self.signature)
+            .map_err(|_| "signature is not hex".to_string())?
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes".to_string())?;
+        verifying
+            .verify_strict(self.hash.as_bytes(), &Signature::from_bytes(&sig_bytes))
+            .map_err(|_| "invalid block signature".to_string())
     }
 }
 
@@ -249,13 +296,40 @@ mod tests {
     fn test_block_hash_determinism() {
         // Two blocks with same params at same timestamp should have same hash
         let ts = Utc::now();
-        let vrf_proof = String::new();
-        let h1 = Block::calculate_hash(1, &ts, "merkle", "prev", "val", &vrf_proof);
-        let h2 = Block::calculate_hash(1, &ts, "merkle", "prev", "val", &vrf_proof);
+        let h1 = Block::calculate_hash(1, &ts, "merkle", 0, "prev", "val", "pk");
+        let h2 = Block::calculate_hash(1, &ts, "merkle", 0, "prev", "val", "pk");
         assert_eq!(h1, h2);
 
         // Changing any field changes the hash
-        let h3 = Block::calculate_hash(2, &ts, "merkle", "prev", "val", &vrf_proof);
+        let h3 = Block::calculate_hash(2, &ts, "merkle", 0, "prev", "val", "pk");
         assert_ne!(h1, h3);
+        let h4 = Block::calculate_hash(1, &ts, "merkle", 1, "prev", "val", "pk");
+        assert_ne!(h1, h4);
+    }
+
+    #[test]
+    fn test_signed_block_verifies_and_detects_tampering() {
+        let key = generate_ed25519_keypair();
+        let block = Block::new_signed(
+            1,
+            vec![make_signed_tx(&key, 0)],
+            "prev".into(),
+            Utc::now(),
+            &key,
+        );
+        assert_eq!(block.validator, pubkey_to_address_hex(&key.verifying_key()));
+        assert!(block.verify_signature().is_ok());
+
+        let mut forged = block.clone();
+        forged.validator = "f".repeat(40);
+        assert!(forged.verify_signature().is_err());
+
+        let mut resigned = block.clone();
+        let other = generate_ed25519_keypair();
+        resigned.signature = hex::encode(other.sign(block.hash.as_bytes()).to_bytes());
+        assert!(resigned.verify_signature().is_err());
+
+        let unsigned = Block::new(1, vec![], "prev".into(), "val".into());
+        assert!(unsigned.verify_signature().is_err());
     }
 }

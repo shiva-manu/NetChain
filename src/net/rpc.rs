@@ -13,12 +13,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::blockchain::Blockchain;
 use crate::mempool::Mempool;
@@ -68,6 +67,92 @@ pub struct ProposalInfo {
     pub voter_count: usize,
 }
 
+/// Static facts about this node, served by `get_node_info`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub chain_id: String,
+    pub genesis_hash: String,
+    pub node_address: String,
+    pub peer_id: String,
+    pub version: String,
+}
+
+/// Testnet faucet: sends real, signed transfers from a funded key.
+pub struct Faucet {
+    key: ed25519_dalek::SigningKey,
+    pub address: String,
+    pub amount: u64,
+    pub fee: u64,
+    cooldown: std::time::Duration,
+    max_per_minute: usize,
+    recent: Mutex<FaucetLimits>,
+}
+
+#[derive(Default)]
+struct FaucetLimits {
+    by_address: HashMap<String, std::time::Instant>,
+    window: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl Faucet {
+    pub fn new(
+        key: ed25519_dalek::SigningKey,
+        amount: u64,
+        fee: u64,
+        cooldown_secs: u64,
+        max_per_minute: usize,
+    ) -> Self {
+        let address = crate::transaction::pubkey_to_address_hex(&key.verifying_key());
+        Self {
+            key,
+            address,
+            amount,
+            fee,
+            cooldown: std::time::Duration::from_secs(cooldown_secs),
+            max_per_minute: max_per_minute.max(1),
+            recent: Mutex::new(FaucetLimits::default()),
+        }
+    }
+
+    /// Check rate limits for `recipient` without consuming them.
+    async fn check(&self, recipient: &str) -> Result<(), String> {
+        let now = std::time::Instant::now();
+        let mut limits = self.recent.lock().await;
+        while limits
+            .window
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(60))
+        {
+            limits.window.pop_front();
+        }
+        if limits.window.len() >= self.max_per_minute {
+            return Err("Faucet is busy, try again in a minute".into());
+        }
+        if let Some(last) = limits.by_address.get(recipient) {
+            let elapsed = now.duration_since(*last);
+            if elapsed < self.cooldown {
+                return Err(format!(
+                    "This address already received tokens; try again in {} minutes",
+                    (self.cooldown - elapsed).as_secs() / 60 + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a successful payout to `recipient`.
+    async fn record(&self, recipient: &str) {
+        let now = std::time::Instant::now();
+        let mut limits = self.recent.lock().await;
+        limits.by_address.insert(recipient.to_string(), now);
+        limits.window.push_back(now);
+    }
+}
+
+fn is_address(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Shared state for RPC handlers
 pub struct RpcState {
     pub blockchain: Arc<Mutex<Blockchain>>,
@@ -76,6 +161,8 @@ pub struct RpcState {
     pub p2p: P2PHandle,
     /// Transaction index: tx_hash -> (block_height, tx_index_in_block)
     pub tx_index: Arc<Mutex<HashMap<String, (u64, usize)>>>,
+    pub faucet: Option<Faucet>,
+    pub node_info: NodeInfo,
 }
 
 fn json_response(status: StatusCode, body: String) -> Response<Full<Bytes>> {
@@ -106,18 +193,6 @@ fn parse_query(query: &str) -> HashMap<String, String> {
             Some((key, value))
         })
         .collect()
-}
-
-/// Build a transaction index from the current blockchain.
-pub async fn build_tx_index(blockchain: &Blockchain) -> HashMap<String, (u64, usize)> {
-    let mut index = HashMap::new();
-    for block in &blockchain.chain {
-        for (tx_idx, signed_tx) in block.transactions.iter().enumerate() {
-            let tx_hash = signed_tx.tx_hash_hex();
-            index.insert(tx_hash, (block.index, tx_idx));
-        }
-    }
-    index
 }
 
 /// Handle REST API requests.
@@ -214,9 +289,9 @@ async fn handle_rest_request(
 
         p if p.starts_with("/api/v1/transactions/") => {
             let tx_hash = &p["/api/v1/transactions/".len()..];
-            let tx_index = rpc_state.tx_index.lock().await;
-            match tx_index.get(tx_hash) {
-                Some(&(block_height, tx_idx)) => {
+            let location = rpc_state.tx_index.lock().await.get(tx_hash).copied();
+            match location {
+                Some((block_height, tx_idx)) => {
                     let bc = rpc_state.blockchain.lock().await;
                     match bc.get_block(block_height) {
                         Some(block) => {
@@ -500,9 +575,14 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
         }
 
         RpcRequest::GetNonce { address } => {
+            // Next usable nonce: confirmed nonce plus this sender's queued transactions.
             let state = rpc_state.state.lock().await;
-            let nonce = state.get_nonce(&address);
-            RpcResponse::success(serde_json::json!({ "nonce": nonce }))
+            let confirmed = state.get_nonce(&address);
+            let pending = rpc_state.mempool.lock().await.pending_count(&address) as u64;
+            RpcResponse::success(serde_json::json!({
+                "nonce": confirmed + pending,
+                "confirmed_nonce": confirmed,
+            }))
         }
 
         RpcRequest::SendTransaction { tx_json } => {
@@ -649,52 +729,85 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
         }
 
         RpcRequest::FaucetTokens { address } => {
-            if address.is_empty() {
-                return RpcResponse::error("Invalid address");
+            let address = address.trim().to_lowercase();
+            if !is_address(&address) {
+                return RpcResponse::error("Invalid address: expected 40 hex characters");
+            }
+            let Some(faucet) = rpc_state.faucet.as_ref() else {
+                return RpcResponse::error("This node does not run a faucet");
+            };
+            if address == faucet.address {
+                return RpcResponse::error("Cannot fund the faucet itself");
+            }
+            if let Err(e) = faucet.check(&address).await {
+                return RpcResponse::error(e);
             }
 
-            const FAUCET_AMOUNT: u64 = 10;
-            const FAUCET_SOURCE: &str = "genesis_account";
+            let signed_tx = {
+                let state = rpc_state.state.lock().await;
+                let mut mempool = rpc_state.mempool.lock().await;
+                let nonce = state.get_nonce(&faucet.address)
+                    + mempool.pending_count(&faucet.address) as u64;
+                let tx = crate::transaction::Transaction::new(
+                    faucet.address.clone(),
+                    address.clone(),
+                    faucet.amount,
+                    faucet.fee,
+                    nonce,
+                    Some("faucet".into()),
+                );
+                let signed = SignedTransaction::sign_with_keypair(&tx, &faucet.key);
+                if let Err(e) = mempool.add_transaction(signed.clone(), &state) {
+                    warn!(error = ?e, "faucet transaction rejected");
+                    return RpcResponse::error(match e {
+                        crate::mempool::MemPoolError::InvalidTransaction(
+                            crate::state::StateError::InsufficientBalance,
+                        ) => "Faucet is empty".to_string(),
+                        other => format!("Faucet transaction rejected: {other:?}"),
+                    });
+                }
+                signed
+            };
 
-            let mut state = rpc_state.state.lock().await;
-
-            // Ensure source has enough balance
-            let source_balance = state
-                .accounts
-                .get(FAUCET_SOURCE)
-                .map(|a| a.balance)
-                .unwrap_or(0);
-            if source_balance < FAUCET_AMOUNT {
-                return RpcResponse::error("Faucet is empty");
+            if let Ok(json) = serde_json::to_string(&signed_tx) {
+                rpc_state.p2p.publish_transaction(json);
             }
-
-            // Debit source
-            if let Some(source) = state.accounts.get_mut(FAUCET_SOURCE) {
-                source.balance -= FAUCET_AMOUNT;
-            }
-
-            // Credit recipient
-            let recipient = state
-                .accounts
-                .entry(address.clone())
-                .or_insert_with(|| crate::state::Account::new(0));
-            recipient.balance += FAUCET_AMOUNT;
-
-            // Generate a synthetic tx hash
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let hash_input = format!("faucet:{}:{}:{}", address, FAUCET_AMOUNT, now);
-            let hash_bytes = sha2::Sha256::digest(hash_input.as_bytes());
-            let tx_hash = hex::encode(hash_bytes);
-
+            let tx_hash = signed_tx.tx_hash_hex();
+            faucet.record(&address).await;
+            info!(recipient = %address, amount = faucet.amount, %tx_hash, "faucet transfer queued");
             RpcResponse::success(serde_json::json!({
                 "tx_hash": tx_hash,
-                "amount": FAUCET_AMOUNT,
+                "amount": faucet.amount,
                 "recipient": address,
-                "message": format!("{} NCN sent to {}", FAUCET_AMOUNT, address),
+                "message": format!(
+                    "{} NCN sent to {} (included in the next block)",
+                    faucet.amount, address
+                ),
             }))
+        }
+
+        RpcRequest::GetValidators => {
+            let tip_time = rpc_state
+                .blockchain
+                .lock()
+                .await
+                .last_block()
+                .timestamp
+                .timestamp();
+            let state = rpc_state.state.lock().await;
+            RpcResponse::success(crate::engine::validator_report(
+                &state,
+                tip_time.max(0) as u64,
+            ))
+        }
+
+        RpcRequest::GetNodeInfo => {
+            let peers = rpc_state.p2p.shared_state().get_peer_count();
+            let mut info = serde_json::to_value(&rpc_state.node_info).unwrap_or_default();
+            info["peer_count"] = serde_json::json!(peers);
+            info["faucet_address"] =
+                serde_json::json!(rpc_state.faucet.as_ref().map(|f| f.address.clone()));
+            RpcResponse::success(info)
         }
 
         RpcRequest::GetContract { address } => {

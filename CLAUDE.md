@@ -47,6 +47,8 @@ The project produces two binaries (`netchain` node and `netchain-wallet` CLI) th
 |---|---|
 | `netchain::block` | `src/chain/block.rs` |
 | `netchain::blockchain` | `src/chain/blockchain.rs` |
+| `netchain::engine` | `src/chain/engine.rs` |
+| `netchain::genesis` | `src/chain/genesis.rs` |
 | `netchain::state` | `src/chain/state.rs` |
 | `netchain::transaction` | `src/chain/transaction.rs` |
 | `netchain::config` | `src/app/config.rs` |
@@ -62,39 +64,40 @@ The project produces two binaries (`netchain` node and `netchain-wallet` CLI) th
 | `netchain::monitoring` | `src/net/monitoring.rs` |
 | `netchain::dht` | `src/net/dht.rs` |
 | `netchain::mempool` | `src/node/mempool.rs` |
-| `netchain::producer` | `src/node/producer.rs` |
+| `netchain::chain_service` | `src/node/chain_service.rs` |
+| `netchain::node_key` | `src/node/node_key.rs` |
 | `netchain::storage` | `src/node/storage.rs` |
 | `netchain::wallet` | `src/wallet/mod.rs` |
 
 ### Hybrid Consensus (Proof of Internet)
 
-Validator selection is a composite score blending multiple signals:
+`src/chain/engine.rs` is the single source of truth for consensus. Everything there is a pure, integer-only function of the parent block and the post-parent state, so all nodes agree:
 
-- **PoI metrics**: download speed, upload speed, latency, uptime, stability (measured via Cloudflare endpoints)
-- **Stake weight**: economic weight (configurable 0.0–1.0 via `stake_weight`)
-- **Identity & reputation**: long-running node stability rewards
-- **Attestations**: peer-verified metric challenges (minimum 3 by default)
-- **Slashing penalties**: persistent trust penalties for invalid blocks, metric fraud, or missed blocks
+- **Slots**: `slot = timestamp / block_interval_secs`; each block must be in a later slot than its parent and no more than 15s in the future.
+- **Proposer**: weighted pick over active validators (stake >= `min_validator_stake`, not jailed), seeded by `sha256(parent_hash, slot)`. Weight blends trust (40% PoI, 40% uptime, 20% slashing) with normalized stake via `stake_weight`.
+- **PoI**: median of recent `AttestMetrics` txs (RTT + throughput measured peer-to-peer by other validators) stored in `State::metric_attestations`.
+- **Uptime/jailing**: `State::validator_stats` EWMA updated per block (produced / missed slots); uptime < 50% jails the validator until it sends `Unjail` (nodes do this automatically).
+- **Blocks** are signed by the proposer's node key; `validator` is its address (`hex(sha256(pubkey)[..20])`).
 
-The `PoiScorer` in `src/poi/consensus.rs` computes the final validator score. `BlockProducer` in `src/node/producer.rs` uses it to select the next block producer.
+`src/poi/consensus.rs` (`PoiScorer`), `metrics_aggregator`, `anti_gaming`, `epoch_manager`, `metric_challenge` and `dht` are earlier off-chain experiments and are **not** used by the node or consensus.
 
 ### Key Data Flow
 
-1. **Transactions** arrive via RPC (`src/net/rpc.rs`) → validated and stored in `Mempool`
-2. **Block production** runs on a timer (`block_interval_secs`): `BlockProducer` selects validator via PoI scorer, drains mempool, produces block
-3. **P2P gossip** (`src/net/p2p.rs` via libp2p/gossipsub) broadcasts blocks and transactions between nodes
-4. **State transitions** applied atomically per block in `State` (`src/chain/state.rs`); invalid txs reject the whole block and slash the proposing validator
-5. **Governance** proposals and votes are on-chain transactions; passed proposals update runtime parameters (block reward, interval, etc.) without restart
-6. **Metric challenges**: peers challenge each other's bandwidth claims via P2P; responses are attested and stored in `MetricsAggregator`
-7. **Epochs**: `EpochManager` tracks block production per epoch, applies reputation decay, and can slash validators who miss their epoch quota
+1. **Transactions** arrive via RPC or gossip → validated against state + the sender's already-queued txs → `Mempool`
+2. **Block production**: every 500ms the node asks `ChainService::try_produce`; if its key owns the current slot it builds, applies and gossips a signed block
+3. **Import**: gossiped blocks extending the tip go through `engine::import_block`; anything else triggers a direct request-response sync. `ChainService::import_sync_blocks` extends, buffers a competing fork, or reorgs to a strictly longer fully-validated fork
+4. **State** is never persisted separately: startup replays and re-verifies all stored blocks from the genesis spec
+5. **Networking** (`src/net/p2p.rs`): gossipsub (topics namespaced by genesis hash), request-response JSON (sync, bandwidth probes), ping (RTT), identify + Kademlia (peer discovery from bootnodes), optional mDNS
+6. **Identity**: `<data_dir>/node_key` is the validator key, block-signing key and libp2p identity; `node_key::address_from_peer_id` maps peers to on-chain addresses
+7. **Governance** proposals execute in proposal-id order at block time
 
 ### Persistent Storage
 
-Uses `sled` embedded database. `Storage` (`src/node/storage.rs`) persists blocks and state. The `data/` directory (configurable via `DATA_DIR`) holds the sled database.
+Uses `sled` embedded database under `<data_dir>/db`. `Storage` persists blocks plus the network's genesis hash (a data dir from another network or an old unsigned-block version is refused at startup). `<data_dir>` also holds `node_key` and, for dev chains, `genesis.json`.
 
 ### Configuration
 
-Loaded from `config/default.toml` by default. Override with `NETCHAIN_CONFIG` env var. All config sections have env var overrides documented in the README (e.g., `NETCHAIN_BLOCK_INTERVAL_SECS`, `NETCHAIN_STAKE_WEIGHT`).
+Loaded from `config/default.toml` by default. Override with `NETCHAIN_CONFIG` env var. Env overrides are documented in the README. Consensus parameters come from the genesis file (`NETCHAIN_GENESIS`); without one the node creates a single-validator dev genesis from the `[producer]` values. `scripts/local-testnet.sh` runs a 3-validator network locally.
 
 ### Website
 
