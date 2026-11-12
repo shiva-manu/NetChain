@@ -43,6 +43,7 @@ import { SectionBackground } from "@/components/sections/section-background";
 import {
   DEFAULT_MONITORING_URL,
   DEFAULT_RPC_URL,
+  DEFAULT_WS_URL,
 } from "@/lib/netchain-client";
 import { useNetChain } from "@/lib/use-netchain";
 import type {
@@ -60,7 +61,7 @@ import { cn } from "@/lib/utils";
 const DEFAULT_ENDPOINTS: NetChainEndpoints = {
   rpcUrl: DEFAULT_RPC_URL,
   monitoringUrl: DEFAULT_MONITORING_URL,
-  wsUrl: "ws://127.0.0.1:8546",
+  wsUrl: DEFAULT_WS_URL,
 };
 
 const WATCHLIST_STORAGE_KEY = "netchain-dashboard-watchlist";

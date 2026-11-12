@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   DEFAULT_MONITORING_URL,
   DEFAULT_RPC_URL,
+  DEFAULT_WS_URL,
   NetChainClient,
 } from "@/lib/netchain-client";
 import type {
@@ -23,7 +24,7 @@ import type {
 const DEFAULT_ENDPOINTS: NetChainEndpoints = {
   rpcUrl: DEFAULT_RPC_URL,
   monitoringUrl: DEFAULT_MONITORING_URL,
-  wsUrl: "wss://api.netchain.me/ws",
+  wsUrl: DEFAULT_WS_URL,
 };
 
 const STORAGE_KEY = "netchain-dashboard-endpoints";

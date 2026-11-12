@@ -66,23 +66,6 @@ impl TokenRegistry {
         self.balances
             .insert((address.to_string(), token_id.to_string()), balance);
     }
-
-    /// Get all token balances for an address.
-    pub fn get_account_token_balances(&self, address: &str) -> HashMap<TokenId, u64> {
-        self.balances
-            .iter()
-            .filter(|((addr, _), _)| addr == address)
-            .map(|((_, token_id), &balance)| (token_id.clone(), balance))
-            .collect()
-    }
-
-    /// Get all NFTs owned by an address.
-    pub fn get_account_nfts(&self, address: &str) -> Vec<&NftInfo> {
-        self.nfts
-            .values()
-            .filter(|nft| nft.owner == address)
-            .collect()
-    }
 }
 
 /// Derive a deterministic token ID from creator, name, symbol, and timestamp.
@@ -135,19 +118,6 @@ mod tests {
 
         registry.set_token_balance("alice", "token1", 100);
         assert_eq!(registry.get_token_balance("alice", "token1"), 100);
-    }
-
-    #[test]
-    fn test_token_registry_account_balances() {
-        let mut registry = TokenRegistry::new();
-        registry.set_token_balance("alice", "t1", 100);
-        registry.set_token_balance("alice", "t2", 200);
-        registry.set_token_balance("bob", "t1", 50);
-
-        let alice_balances = registry.get_account_token_balances("alice");
-        assert_eq!(alice_balances.len(), 2);
-        assert_eq!(alice_balances.get("t1"), Some(&100));
-        assert_eq!(alice_balances.get("t2"), Some(&200));
     }
 
     #[test]

@@ -1,37 +1,24 @@
+// src/app/config.rs
+//! Runtime configuration: `config/default.toml` (or `NETCHAIN_CONFIG`) plus environment
+//! overrides. Environment variables follow PaaS conventions so the same image runs locally,
+//! in Docker and on Railway: `PORT` is the HTTP port, `DATA_DIR` the persistent directory.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::measurement::MeasurementConfig;
 use crate::state::ChainParams;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub node: NodeConfig,
-    pub rpc: ServerConfig,
-    pub monitoring: MonitoringConfig,
-    pub websocket: WebSocketConfig,
+    pub http: HttpConfig,
     pub producer: ProducerRuntimeConfig,
-    pub measurement: MeasurementConfig,
     pub faucet: FaucetConfig,
     pub poi: PoiRuntimeConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            node: NodeConfig::default(),
-            rpc: ServerConfig::default_rpc(),
-            monitoring: MonitoringConfig::default(),
-            websocket: WebSocketConfig::default(),
-            producer: ProducerRuntimeConfig::default(),
-            measurement: MeasurementConfig::default(),
-            faucet: FaucetConfig::default(),
-            poi: PoiRuntimeConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -73,99 +60,108 @@ impl AppConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(value) = std::env::var("DATA_DIR") {
-            self.node.data_dir = value;
-        }
-        if let Ok(value) = std::env::var("PORT") {
-            if let Ok(port) = value.parse() {
-                self.node.p2p_port = port;
-            }
-        }
-        if let Ok(value) = std::env::var("RPC_PORT") {
-            if let Ok(port) = value.parse() {
-                self.rpc.port = port;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_RPC_BIND_ADDR") {
-            self.rpc.bind_addr = value;
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_MONITORING_PORT") {
-            if let Ok(port) = value.parse() {
-                self.monitoring.port = port;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_MONITORING_BIND_ADDR") {
-            self.monitoring.bind_addr = value;
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_LOG_LEVEL") {
-            self.node.log_level = value;
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_WS_PORT") {
-            if let Ok(port) = value.parse() {
-                self.websocket.port = port;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_WS_BIND_ADDR") {
-            self.websocket.bind_addr = value;
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_BLOCK_INTERVAL_SECS") {
-            if let Ok(parsed) = value.parse() {
-                self.producer.block_interval_secs = parsed;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_BLOCK_REWARD") {
-            if let Ok(parsed) = value.parse() {
-                self.producer.block_reward = parsed;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_MAX_TXS_PER_BLOCK") {
-            if let Ok(parsed) = value.parse() {
-                self.producer.max_txs_per_block = parsed;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_STAKE_WEIGHT") {
-            if let Ok(parsed) = value.parse::<f64>() {
-                self.producer.stake_weight = parsed.clamp(0.0, 1.0);
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_MEMPOOL_TTL_SECS") {
-            if let Ok(parsed) = value.parse() {
-                self.producer.mempool_ttl_secs = parsed;
-            }
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_GENESIS") {
-            self.node.genesis_file = Some(value);
-        }
-        if let Ok(value) = std::env::var("NETCHAIN_BOOTNODES") {
-            self.node.bootnodes = value
-                .split(',')
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let flag = |v: String| matches!(v.trim(), "1" | "true" | "yes");
+        let list = |v: String| -> Vec<String> {
+            v.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from)
-                .collect();
+                .collect()
+        };
+
+        if let Some(v) = var("DATA_DIR") {
+            self.node.data_dir = v;
         }
-        if let Ok(value) = std::env::var("NETCHAIN_ENABLE_MDNS") {
-            self.node.enable_mdns = matches!(value.as_str(), "1" | "true" | "yes");
+        if let Some(v) = var("NETCHAIN_LOG_LEVEL") {
+            self.node.log_level = v;
         }
-        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_ENABLED") {
-            self.faucet.enabled = matches!(value.as_str(), "1" | "true" | "yes");
+        if let Some(port) = var("NETCHAIN_P2P_PORT").and_then(|v| v.parse().ok()) {
+            self.node.p2p_port = port;
         }
-        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_KEY_FILE") {
-            self.faucet.key_file = Some(value);
+        if let Some(v) = var("NETCHAIN_BOOTNODES") {
+            self.node.bootnodes = list(v);
         }
-        if let Ok(value) = std::env::var("NETCHAIN_FAUCET_AMOUNT") {
-            if let Ok(parsed) = value.parse() {
-                self.faucet.amount = parsed;
+        if let Some(v) = var("NETCHAIN_EXTERNAL_ADDRS") {
+            self.node.external_addrs = list(v);
+        }
+        // Railway TCP proxy: advertise the public proxy address to peers.
+        if let (Some(domain), Some(port)) = (
+            var("RAILWAY_TCP_PROXY_DOMAIN"),
+            var("RAILWAY_TCP_PROXY_PORT"),
+        ) {
+            let addr = format!("/dns4/{domain}/tcp/{port}");
+            if !self.node.external_addrs.contains(&addr) {
+                self.node.external_addrs.push(addr);
             }
         }
-        if let Ok(value) = std::env::var("NETCHAIN_ATTEST_INTERVAL_SECS") {
-            if let Ok(parsed) = value.parse() {
-                self.poi.attest_interval_secs = parsed;
+        if let Some(v) = var("NETCHAIN_ENABLE_MDNS") {
+            self.node.enable_mdns = flag(v);
+        }
+        if let Some(v) = var("NETCHAIN_GENESIS") {
+            self.node.genesis_file = Some(v);
+        }
+        if let Some(v) = var("NETCHAIN_GENESIS_JSON") {
+            self.node.genesis_json = Some(v);
+        }
+        if let Some(v) = var("NETCHAIN_GENESIS_URL") {
+            self.node.genesis_url = Some(v);
+        }
+        if let Some(v) = var("NETCHAIN_NODE_KEY") {
+            self.node.node_key = Some(Secret(v));
+        }
+
+        // HTTP gateway: PORT is the PaaS convention; RPC_PORT is kept for older setups.
+        for name in ["RPC_PORT", "PORT", "NETCHAIN_HTTP_PORT"] {
+            if let Some(port) = var(name).and_then(|v| v.parse().ok()) {
+                self.http.port = port;
             }
         }
-        if let Ok(value) = std::env::var("NETCHAIN_MEASUREMENT_ENABLED") {
-            self.poi.self_measurement_enabled = matches!(value.as_str(), "1" | "true" | "yes");
+        for name in ["NETCHAIN_RPC_BIND_ADDR", "NETCHAIN_HTTP_BIND_ADDR"] {
+            if let Some(v) = var(name) {
+                self.http.bind_addr = v;
+            }
         }
+
+        if let Some(v) = var("NETCHAIN_BLOCK_INTERVAL_SECS").and_then(|v| v.parse().ok()) {
+            self.producer.block_interval_secs = v;
+        }
+        if let Some(v) = var("NETCHAIN_BLOCK_REWARD").and_then(|v| v.parse().ok()) {
+            self.producer.block_reward = v;
+        }
+        if let Some(v) = var("NETCHAIN_MAX_TXS_PER_BLOCK").and_then(|v| v.parse().ok()) {
+            self.producer.max_txs_per_block = v;
+        }
+        if let Some(v) = var("NETCHAIN_STAKE_WEIGHT").and_then(|v| v.parse::<f64>().ok()) {
+            self.producer.stake_weight = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = var("NETCHAIN_MEMPOOL_TTL_SECS").and_then(|v| v.parse().ok()) {
+            self.producer.mempool_ttl_secs = v;
+        }
+
+        if let Some(v) = var("NETCHAIN_FAUCET_ENABLED") {
+            self.faucet.enabled = flag(v);
+        }
+        if let Some(v) = var("NETCHAIN_FAUCET_KEY_FILE") {
+            self.faucet.key_file = Some(v);
+        }
+        if let Some(v) = var("NETCHAIN_FAUCET_AMOUNT").and_then(|v| v.parse().ok()) {
+            self.faucet.amount = v;
+        }
+        if let Some(v) = var("NETCHAIN_ATTEST_INTERVAL_SECS").and_then(|v| v.parse().ok()) {
+            self.poi.attest_interval_secs = v;
+        }
+    }
+}
+
+/// A string that must never be printed (e.g. a private key).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
     }
 }
 
@@ -175,11 +171,18 @@ pub struct NodeConfig {
     pub data_dir: String,
     pub p2p_port: u16,
     pub log_level: String,
-    /// Genesis JSON shared by every node of the network. When unset, the node creates a
-    /// single-validator development genesis in `<data_dir>/genesis.json`.
+    /// Genesis JSON file shared by every node of the network.
     pub genesis_file: Option<String>,
-    /// Multiaddrs of peers to connect to, e.g. `/ip4/203.0.113.7/tcp/30333`.
+    /// Genesis JSON given inline (handy as a PaaS environment variable).
+    pub genesis_json: Option<String>,
+    /// URL of a node's `/genesis` endpoint to download the network's genesis from.
+    pub genesis_url: Option<String>,
+    /// Node key as hex (otherwise `<data_dir>/node_key` is used / created).
+    pub node_key: Option<Secret>,
+    /// Multiaddrs of peers to connect to, e.g. `/dns4/node.example.com/tcp/30333`.
     pub bootnodes: Vec<String>,
+    /// Publicly reachable addresses of this node, advertised to peers.
+    pub external_addrs: Vec<String>,
     /// Discover peers on the local network with mDNS.
     pub enable_mdns: bool,
 }
@@ -191,8 +194,54 @@ impl Default for NodeConfig {
             p2p_port: 30333,
             log_level: "info".to_string(),
             genesis_file: None,
+            genesis_json: None,
+            genesis_url: None,
+            node_key: None,
             bootnodes: Vec::new(),
+            external_addrs: Vec::new(),
             enable_mdns: true,
+        }
+    }
+}
+
+/// One HTTP port serves JSON-RPC (`/rpc`), REST (`/api/v1/*`), monitoring (`/health`,
+/// `/metrics`, `/validators`), the genesis file (`/genesis`) and WebSocket events (`/ws`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpConfig {
+    pub bind_addr: String,
+    pub port: u16,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: "127.0.0.1".to_string(),
+            port: 8545,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProducerRuntimeConfig {
+    pub max_txs_per_block: usize,
+    pub block_interval_secs: u64,
+    pub block_reward: u64,
+    /// How much stake weight influences validator selection (0.0 = pure PoI, 1.0 = pure PoS)
+    pub stake_weight: f64,
+    /// Time-to-live for mempool transactions in seconds (default 900 = 15 min)
+    pub mempool_ttl_secs: u64,
+}
+
+impl Default for ProducerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_txs_per_block: 100,
+            block_interval_secs: 15,
+            block_reward: 50,
+            stake_weight: 0.3,
+            mempool_ttl_secs: 900,
         }
     }
 }
@@ -232,8 +281,6 @@ pub struct PoiRuntimeConfig {
     pub probe_bytes: usize,
     /// Fee paid per attestation transaction.
     pub attestation_fee: u64,
-    /// Run the periodic Cloudflare speed test (informational only, shown in /metrics).
-    pub self_measurement_enabled: bool,
 }
 
 impl Default for PoiRuntimeConfig {
@@ -242,91 +289,6 @@ impl Default for PoiRuntimeConfig {
             attest_interval_secs: 120,
             probe_bytes: 1_000_000,
             attestation_fee: 1,
-            self_measurement_enabled: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ServerConfig {
-    pub bind_addr: String,
-    pub port: u16,
-}
-
-impl ServerConfig {
-    fn default_rpc() -> Self {
-        Self {
-            bind_addr: "127.0.0.1".to_string(),
-            port: 8545,
-        }
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self::default_rpc()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MonitoringConfig {
-    pub bind_addr: String,
-    pub port: u16,
-    pub enabled: bool,
-}
-
-impl Default for MonitoringConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1".to_string(),
-            port: 9090,
-            enabled: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSocketConfig {
-    pub bind_addr: String,
-    pub port: u16,
-    pub enabled: bool,
-}
-
-impl Default for WebSocketConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1".to_string(),
-            port: 8546,
-            enabled: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProducerRuntimeConfig {
-    pub max_txs_per_block: usize,
-    pub block_interval_secs: u64,
-    pub block_reward: u64,
-    pub metric_measurement_interval_secs: u64,
-    /// How much stake weight influences validator selection (0.0 = pure PoI, 1.0 = pure PoS)
-    pub stake_weight: f64,
-    /// Time-to-live for mempool transactions in seconds (default 900 = 15 min)
-    pub mempool_ttl_secs: u64,
-}
-
-impl Default for ProducerRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            max_txs_per_block: 100,
-            block_interval_secs: 15,
-            block_reward: 50,
-            metric_measurement_interval_secs: 120,
-            stake_weight: 0.3,
-            mempool_ttl_secs: 900,
         }
     }
 }

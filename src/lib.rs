@@ -3,8 +3,6 @@
 //! The binaries (`src/main.rs` and `src/bin/wallet.rs`) share core logic through this crate to
 //! prevent type drift and reduce duplicated security-critical code.
 
-#[path = "poi/anti_gaming.rs"]
-pub mod anti_gaming;
 #[path = "chain/block.rs"]
 pub mod block;
 #[path = "chain/blockchain.rs"]
@@ -13,28 +11,16 @@ pub mod blockchain;
 pub mod chain_service;
 #[path = "app/config.rs"]
 pub mod config;
-#[path = "poi/consensus.rs"]
-pub mod consensus;
 #[path = "chain/contract.rs"]
 pub mod contract;
-#[path = "chain/contract_storage.rs"]
-pub mod contract_storage;
-#[path = "net/dht.rs"]
-pub mod dht;
 #[path = "chain/engine.rs"]
 pub mod engine;
-#[path = "poi/epoch_manager.rs"]
-pub mod epoch_manager;
 #[path = "chain/genesis.rs"]
 pub mod genesis;
-#[path = "poi/measurement.rs"]
-pub mod measurement;
+#[path = "net/http.rs"]
+pub mod http;
 #[path = "node/mempool.rs"]
 pub mod mempool;
-#[path = "poi/metric_challenge.rs"]
-pub mod metric_challenge;
-#[path = "poi/metrics_aggregator.rs"]
-pub mod metrics_aggregator;
 #[path = "net/monitoring.rs"]
 pub mod monitoring;
 #[path = "node/node_key.rs"]

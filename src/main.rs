@@ -4,6 +4,7 @@
 //! ```text
 //! netchain                 run the node (same as `netchain run`)
 //! netchain id              print this node's address / peer id (creates the node key)
+//! netchain keygen          print a new node key (for NETCHAIN_NODE_KEY on a PaaS)
 //! netchain genesis ...     write a genesis file for a new network
 //! ```
 
@@ -23,14 +24,14 @@ use netchain::chain_service::{ChainService, GossipImport};
 use netchain::config::AppConfig;
 use netchain::engine;
 use netchain::genesis::{GenesisAllocation, GenesisSpec, GenesisValidator};
-use netchain::measurement::MeasurementService;
-use netchain::monitoring::{start_monitoring_server, MonitoringState};
+use netchain::http::{self, Gateway};
+use netchain::monitoring::MonitoringState;
 use netchain::node_key;
 use netchain::p2p::{P2PConfig, P2PEvent, P2PHandle, P2PService};
-use netchain::rpc::{start_rpc_server, Faucet, NodeInfo, RpcState};
+use netchain::rpc::{Faucet, NodeInfo, RpcState};
 use netchain::storage::Storage;
 use netchain::transaction::{SignedTransaction, Transaction};
-use netchain::websocket::{self, start_ws_server, WsEvent};
+use netchain::websocket::{self, WsEvent};
 
 /// Delay before producing blocks, so a restarted node syncs first instead of forking.
 const STARTUP_SYNC_GRACE: Duration = Duration::from_secs(6);
@@ -56,6 +57,9 @@ enum Command {
     Run,
     /// Print this node's on-chain address and libp2p peer id (creates the node key if missing).
     Id,
+    /// Generate a new node key and print it with its address and peer id. Use the secret as
+    /// `NETCHAIN_NODE_KEY` where the data directory is not the place to keep keys.
+    Keygen,
     /// Write a genesis file for a new network.
     Genesis {
         /// Network name.
@@ -73,7 +77,7 @@ enum Command {
         /// Block interval in seconds.
         #[arg(long)]
         block_interval: Option<u64>,
-        /// Output path.
+        /// Output path, or `-` to print compact JSON to stdout.
         #[arg(long, default_value = "genesis.json")]
         out: PathBuf,
     },
@@ -86,6 +90,7 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Id => print_identity(&config),
+        Command::Keygen => keygen(),
         Command::Genesis {
             chain_id,
             validators,
@@ -106,8 +111,26 @@ async fn main() -> Result<()> {
     }
 }
 
+/// The node key: `NETCHAIN_NODE_KEY` if set, otherwise `<data_dir>/node_key` (created once).
+fn resolve_node_key(config: &AppConfig) -> Result<ed25519_dalek::SigningKey> {
+    match &config.node.node_key {
+        Some(secret) => node_key::from_hex(&secret.0).context("invalid NETCHAIN_NODE_KEY"),
+        None => node_key::load_or_create(&node_key::node_key_path(&config.data_dir())),
+    }
+}
+
+fn keygen() -> Result<()> {
+    let key = netchain::transaction::generate_ed25519_keypair();
+    let peer_id = libp2p::PeerId::from(node_key::libp2p_keypair(&key)?.public());
+    println!("secret:  {}", hex::encode(key.to_bytes()));
+    println!("address: {}", node_key::address_of(&key));
+    println!("peer_id: {peer_id}");
+    eprintln!("Keep the secret private: it controls this validator's stake and rewards.");
+    Ok(())
+}
+
 fn print_identity(config: &AppConfig) -> Result<()> {
-    let key = node_key::load_or_create(&node_key::node_key_path(&config.data_dir()))?;
+    let key = resolve_node_key(config)?;
     let keypair = node_key::libp2p_keypair(&key)?;
     let peer_id = libp2p::PeerId::from(keypair.public());
     println!("address: {}", node_key::address_of(&key));
@@ -162,6 +185,12 @@ fn write_genesis(
         params,
     };
     spec.validate()?;
+    if out == Path::new("-") {
+        // Compact single-line JSON, e.g. for a NETCHAIN_GENESIS_JSON variable.
+        println!("{}", serde_json::to_string(&spec)?);
+        eprintln!("genesis hash {}", spec.genesis_block().hash);
+        return Ok(());
+    }
     spec.save(out)?;
     println!(
         "wrote {} (genesis hash {})",
@@ -171,7 +200,14 @@ fn write_genesis(
     Ok(())
 }
 
-fn load_genesis(config: &AppConfig, node_address: &str) -> Result<GenesisSpec> {
+/// Genesis sources, in order: inline JSON, file, a cached copy in the data dir, a URL
+/// (downloaded once and cached), or a new single-validator dev network.
+async fn load_genesis(config: &AppConfig, node_address: &str) -> Result<GenesisSpec> {
+    if let Some(json) = &config.node.genesis_json {
+        let spec = GenesisSpec::from_json(json).context("invalid NETCHAIN_GENESIS_JSON")?;
+        info!(chain_id = %spec.chain_id, "loaded genesis from NETCHAIN_GENESIS_JSON");
+        return Ok(spec);
+    }
     if let Some(path) = &config.node.genesis_file {
         let spec = GenesisSpec::load(Path::new(path))?;
         info!(chain_id = %spec.chain_id, file = %path, "loaded genesis");
@@ -180,6 +216,19 @@ fn load_genesis(config: &AppConfig, node_address: &str) -> Result<GenesisSpec> {
     let path = config.data_dir().join("genesis.json");
     if path.exists() {
         return GenesisSpec::load(&path);
+    }
+    if let Some(url) = &config.node.genesis_url {
+        let body = reqwest::get(url)
+            .await
+            .and_then(|r| r.error_for_status())
+            .with_context(|| format!("failed to download genesis from {url}"))?
+            .text()
+            .await?;
+        let spec = GenesisSpec::from_json(&body)
+            .with_context(|| format!("invalid genesis served by {url}"))?;
+        spec.save(&path)?;
+        info!(chain_id = %spec.chain_id, %url, "downloaded genesis");
+        return Ok(spec);
     }
     let spec = GenesisSpec::dev(
         node_address,
@@ -208,13 +257,23 @@ async fn run_node(config: AppConfig) -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
 
+    if std::env::var_os("RAILWAY_SERVICE_ID").is_some()
+        && std::env::var_os("RAILWAY_VOLUME_MOUNT_PATH").is_none()
+    {
+        warn!(
+            "running on Railway without a volume: chain data (and the node key, unless \
+             NETCHAIN_NODE_KEY is set) will be lost on every redeploy. Attach a volume at {}",
+            data_dir.display()
+        );
+    }
+
     // Identity
-    let node_key = node_key::load_or_create(&node_key::node_key_path(&data_dir))?;
+    let node_key = resolve_node_key(&config)?;
     let node_address = node_key::address_of(&node_key);
     let libp2p_key = node_key::libp2p_keypair(&node_key)?;
 
     // Chain
-    let genesis = load_genesis(&config, &node_address)?;
+    let genesis = load_genesis(&config, &node_address).await?;
     let storage = Arc::new(Storage::open(&data_dir.join("db"))?);
     let ws_tx = websocket::create_event_channel();
     let chain = Arc::new(ChainService::load(
@@ -234,10 +293,20 @@ async fn run_node(config: AppConfig) -> Result<()> {
                 .with_context(|| format!("invalid bootnode multiaddr {a:?}"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let external_addrs = config
+        .node
+        .external_addrs
+        .iter()
+        .map(|a| {
+            a.parse()
+                .with_context(|| format!("invalid external multiaddr {a:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let (mut p2p_service, p2p, p2p_commands) = P2PService::new(P2PConfig {
         port: config.node.p2p_port,
         keypair: libp2p_key,
         bootnodes,
+        external_addrs,
         enable_mdns: config.node.enable_mdns,
         network_id: genesis_hash.clone(),
     })?;
@@ -285,81 +354,42 @@ async fn run_node(config: AppConfig) -> Result<()> {
         None
     };
 
-    // RPC / monitoring / websocket
-    let rpc_state = Arc::new(RpcState {
-        blockchain: chain.blockchain.clone(),
-        state: chain.state.clone(),
-        mempool: chain.mempool.clone(),
-        p2p: p2p.clone(),
-        tx_index: chain.tx_index.clone(),
-        faucet,
-        node_info: NodeInfo {
-            chain_id: genesis.chain_id.clone(),
-            genesis_hash: genesis_hash.clone(),
-            node_address: node_address.clone(),
-            peer_id: p2p.local_peer_id().to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-    });
-    let (rpc_bind, rpc_port) = (config.rpc.bind_addr.clone(), config.rpc.port);
-    tokio::spawn(async move {
-        if let Err(e) = start_rpc_server(rpc_state, &rpc_bind, rpc_port).await {
-            error!(error = %e, "rpc server error");
-        }
-    });
-
-    let measurement = Arc::new(MeasurementService::new(config.measurement.clone()));
-    if config.monitoring.enabled {
-        let monitoring_state = Arc::new(MonitoringState {
+    // HTTP gateway: RPC, REST, monitoring, genesis and WebSocket on one port.
+    let gateway = Arc::new(Gateway {
+        rpc: Arc::new(RpcState {
+            blockchain: chain.blockchain.clone(),
+            state: chain.state.clone(),
+            mempool: chain.mempool.clone(),
+            p2p: p2p.clone(),
+            tx_index: chain.tx_index.clone(),
+            faucet,
+            node_info: NodeInfo {
+                chain_id: genesis.chain_id.clone(),
+                genesis_hash: genesis_hash.clone(),
+                node_address: node_address.clone(),
+                peer_id: p2p.local_peer_id().to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        }),
+        monitoring: Arc::new(MonitoringState {
             blockchain: chain.blockchain.clone(),
             mempool: chain.mempool.clone(),
             p2p_shared: p2p.shared_state(),
-            measurement: measurement.clone(),
             state: chain.state.clone(),
             started_at: Instant::now(),
             chain_id: genesis.chain_id.clone(),
             node_address: node_address.clone(),
             peer_id: p2p.local_peer_id().to_string(),
-        });
-        let (bind, port) = (config.monitoring.bind_addr.clone(), config.monitoring.port);
-        tokio::spawn(async move {
-            if let Err(e) = start_monitoring_server(monitoring_state, &bind, port).await {
-                error!(error = %e, "monitoring server error");
-            }
-        });
-    }
-
-    if config.websocket.enabled {
-        let (bind, port, tx) = (
-            config.websocket.bind_addr.clone(),
-            config.websocket.port,
-            ws_tx.clone(),
-        );
-        tokio::spawn(async move {
-            if let Err(e) = start_ws_server(&bind, port, tx).await {
-                error!(error = %e, "websocket server error");
-            }
-        });
-    }
-
-    // Informational self speed test (not a consensus input).
-    if config.poi.self_measurement_enabled {
-        let measurement = measurement.clone();
-        let every = Duration::from_secs(config.producer.metric_measurement_interval_secs.max(30));
-        tokio::spawn(async move {
-            let mut tick = interval(every);
-            loop {
-                tick.tick().await;
-                let m = measurement.run_measurement_cycle().await;
-                debug!(
-                    download = m.download_mbps,
-                    upload = m.upload_mbps,
-                    latency = m.latency_ms,
-                    "self measurement"
-                );
-            }
-        });
-    }
+        }),
+        ws_tx: ws_tx.clone(),
+        genesis_json: serde_json::to_string_pretty(&genesis)?,
+    });
+    let (http_bind, http_port) = (config.http.bind_addr.clone(), config.http.port);
+    tokio::spawn(async move {
+        if let Err(e) = http::serve(gateway, &http_bind, http_port).await {
+            error!(error = %e, "http gateway stopped");
+        }
+    });
 
     // Block production: try every half second; the engine decides whether this node owns
     // the current slot.

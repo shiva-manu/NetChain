@@ -70,6 +70,25 @@ pub struct VmContext {
     pub value: u64,
 }
 
+/// Gas per byte written to contract storage.
+pub const STORAGE_BYTE_GAS: u64 = 10;
+
+/// Largest buffer a host function will copy in or out of contract memory.
+pub const MAX_HOST_BUFFER: usize = 64 * 1024;
+
+/// Clamp a contract-supplied length to `0..=MAX_HOST_BUFFER` (negative lengths become 0).
+fn host_len(len: i32) -> usize {
+    usize::try_from(len).unwrap_or(0).min(MAX_HOST_BUFFER)
+}
+
+/// Check that `wasm_code` is a valid module the VM can instantiate later.
+pub fn validate_module(wasm_code: &[u8]) -> Result<(), VmError> {
+    let engine = Engine::new(&Config::default());
+    Module::new(&engine, wasm_code)
+        .map(|_| ())
+        .map_err(|e| VmError::InvalidModule(e.to_string()))
+}
+
 /// Mutable state tracked during execution.
 struct ExecutionState {
     gas_remaining: u64,
@@ -104,7 +123,7 @@ pub fn execute(
         Module::new(&engine, wasm_code).map_err(|e| VmError::InvalidModule(e.to_string()))?;
 
     // Create a store with execution state
-    let mut state = ExecutionState {
+    let state = ExecutionState {
         gas_remaining: context.gas_remaining,
         storage_changes: HashMap::new(),
         events: Vec::new(),
@@ -114,7 +133,7 @@ pub fn execute(
     // Set fuel for gas metering
     let mut store = Store::new(&engine, state);
     store
-        .set_fuel(context.gas_remaining as u64)
+        .set_fuel(context.gas_remaining)
         .map_err(|e| VmError::HostError(e.to_string()))?;
 
     // Create a linker for host functions
@@ -144,20 +163,40 @@ pub fn execute(
         })
         .collect();
 
-    // Call the function
-    let mut results = vec![Val::I64(0)];
+    // Call the function with a result buffer matching its signature.
+    let mut results: Vec<Val> = func
+        .ty(&store)
+        .results()
+        .iter()
+        .map(|ty| Val::default(*ty))
+        .collect();
     func.call(&mut store, &wasm_args, &mut results)
         .map_err(|e| VmError::ExecutionFailed(e.to_string()))?;
 
-    // Calculate gas used
-    let fuel_remaining = store.get_fuel().unwrap_or(0);
-    let gas_used = context.gas_remaining.saturating_sub(fuel_remaining as u64);
-
-    // Extract state from store
+    // Gas = instruction fuel + host-function charges, never more than the limit.
+    let fuel_used = context
+        .gas_remaining
+        .saturating_sub(store.get_fuel().unwrap_or(0));
     let exec_state = store.into_data();
+    let host_used = context
+        .gas_remaining
+        .saturating_sub(exec_state.gas_remaining);
+    let gas_used = fuel_used
+        .saturating_add(host_used)
+        .min(context.gas_remaining);
+
+    // If the contract did not set return data, return its first i32/i64 result.
+    let mut return_data = exec_state.return_data;
+    if return_data.is_empty() {
+        match results.first() {
+            Some(Val::I64(v)) => return_data = v.to_le_bytes().to_vec(),
+            Some(Val::I32(v)) => return_data = (*v as i64).to_le_bytes().to_vec(),
+            _ => {}
+        }
+    }
 
     Ok(VmResult {
-        return_data: exec_state.return_data,
+        return_data,
         gas_used,
         events: exec_state.events,
         storage_changes: exec_state.storage_changes,
@@ -198,7 +237,7 @@ fn register_host_functions(
                 return -1;
             }
 
-            let mut key_buf = vec![0u8; key_len as usize];
+            let mut key_buf = vec![0u8; host_len(key_len)];
             if memory
                 .read(&caller, key_ptr as usize, &mut key_buf)
                 .is_err()
@@ -220,7 +259,7 @@ fn register_host_functions(
 
             match value {
                 Some(val) => {
-                    let copy_len = val.len().min(val_len as usize);
+                    let copy_len = val.len().min(host_len(val_len));
                     if memory
                         .write(&mut caller, val_ptr as usize, &val[..copy_len])
                         .is_err()
@@ -250,13 +289,15 @@ fn register_host_functions(
                 _ => return,
             };
 
-            let gas_cost = 500; // storage_write_cost
+            // Base cost plus a per-byte cost, so filling chain state is expensive.
+            let bytes = (host_len(key_len) + host_len(val_len)) as u64;
+            let gas_cost = 500 + STORAGE_BYTE_GAS * bytes;
             if caller.data().gas_remaining < gas_cost {
                 return;
             }
 
-            let mut key_buf = vec![0u8; key_len as usize];
-            let mut val_buf = vec![0u8; val_len as usize];
+            let mut key_buf = vec![0u8; host_len(key_len)];
+            let mut val_buf = vec![0u8; host_len(val_len)];
             if memory
                 .read(&caller, key_ptr as usize, &mut key_buf)
                 .is_err()
@@ -294,7 +335,7 @@ fn register_host_functions(
                 return;
             }
 
-            let mut key_buf = vec![0u8; key_len as usize];
+            let mut key_buf = vec![0u8; host_len(key_len)];
             if memory
                 .read(&caller, key_ptr as usize, &mut key_buf)
                 .is_err()
@@ -319,7 +360,7 @@ fn register_host_functions(
                 _ => return 0,
             };
             let addr = caller_clone.as_bytes();
-            let copy_len = addr.len().min(max_len as usize);
+            let copy_len = addr.len().min(host_len(max_len));
             if memory
                 .write(&mut caller, ptr as usize, &addr[..copy_len])
                 .is_err()
@@ -340,12 +381,12 @@ fn register_host_functions(
     linker.func_wrap(
         "env",
         "get_balance",
-        move |mut caller: Caller<'_, ExecutionState>, addr_ptr: i32, addr_len: i32| -> i64 {
+        move |caller: Caller<'_, ExecutionState>, addr_ptr: i32, addr_len: i32| -> i64 {
             let memory = match caller.get_export("memory") {
                 Some(Extern::Memory(mem)) => mem,
                 _ => return 0,
             };
-            let mut addr_buf = vec![0u8; addr_len as usize];
+            let mut addr_buf = vec![0u8; host_len(addr_len)];
             if memory
                 .read(&caller, addr_ptr as usize, &mut addr_buf)
                 .is_err()
@@ -368,7 +409,7 @@ fn register_host_functions(
                 _ => return 0,
             };
             let addr = contract_clone.as_bytes();
-            let copy_len = addr.len().min(max_len as usize);
+            let copy_len = addr.len().min(host_len(max_len));
             if memory
                 .write(&mut caller, ptr as usize, &addr[..copy_len])
                 .is_err()
@@ -402,8 +443,8 @@ fn register_host_functions(
                 return;
             }
 
-            let mut topic_buf = vec![0u8; topic_len as usize];
-            let mut data_buf = vec![0u8; data_len as usize];
+            let mut topic_buf = vec![0u8; host_len(topic_len)];
+            let mut data_buf = vec![0u8; host_len(data_len)];
             if memory
                 .read(&caller, topic_ptr as usize, &mut topic_buf)
                 .is_err()
@@ -436,7 +477,7 @@ fn register_host_functions(
                 Some(Extern::Memory(mem)) => mem,
                 _ => return,
             };
-            let mut buf = vec![0u8; len as usize];
+            let mut buf = vec![0u8; host_len(len)];
             if memory.read(&caller, ptr as usize, &mut buf).is_err() {
                 return;
             }
@@ -500,7 +541,7 @@ mod tests {
         args.extend_from_slice(&5i64.to_le_bytes());
 
         let result = execute(&wasm, "add", &args, &ctx).unwrap();
-        assert_eq!(result.gas_used > 0, true);
+        assert!(result.gas_used > 0);
         // The return value is in the results, not return_data
     }
 }

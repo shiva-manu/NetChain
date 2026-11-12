@@ -2,5 +2,8 @@ target
 .git
 .github
 data
-Dockerfile
-docker-compose.yml
+.testnet
+.railway-secrets
+website
+terraform
+*.md

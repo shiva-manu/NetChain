@@ -1,28 +1,26 @@
+# NetChain node configuration. Every value can be overridden by environment variables
+# (see README / RAILWAY.md).
+
 [node]
 data_dir = "./data"
 p2p_port = 30333
 log_level = "info"
-# Genesis file shared by every node of the network. Leave unset to start a private
-# single-validator development chain (written to <data_dir>/genesis.json).
+# Network to join. Leave all three unset to start a private single-validator dev chain
+# (written to <data_dir>/genesis.json).
 # genesis_file = "config/genesis.json"
-# Peers to connect to (multiaddrs), e.g. ["/ip4/203.0.113.7/tcp/30333"].
+# genesis_json = '{"chain_id": "...", ...}'
+# genesis_url = "https://<existing-node>/genesis"
+# Peers to connect to, e.g. ["/ip4/203.0.113.7/tcp/30333", "/dns4/node.example.com/tcp/30333"].
 bootnodes = []
+# Public addresses of this node advertised to peers (Railway's TCP proxy is added automatically).
+external_addrs = []
 # Discover peers on the local network.
 enable_mdns = true
 
-[rpc]
+# One port serves /rpc, /api/v1/*, /health, /metrics, /validators, /genesis and /ws.
+[http]
 bind_addr = "127.0.0.1"
 port = 8545
-
-[monitoring]
-enabled = true
-bind_addr = "127.0.0.1"
-port = 9090
-
-[websocket]
-enabled = true
-bind_addr = "127.0.0.1"
-port = 8546
 
 # Chain parameters used only when this node creates a development genesis.
 # On a shared network these come from the genesis file.
@@ -30,7 +28,6 @@ port = 8546
 max_txs_per_block = 100
 block_interval_secs = 15
 block_reward = 50
-metric_measurement_interval_secs = 120
 stake_weight = 0.3
 mempool_ttl_secs = 900
 
@@ -48,14 +45,3 @@ max_per_minute = 30
 attest_interval_secs = 120
 probe_bytes = 1000000
 attestation_fee = 1
-# Periodic Cloudflare speed test, shown in /metrics only (not used by consensus).
-self_measurement_enabled = false
-
-[measurement]
-download_endpoints = ["https://speed.cloudflare.com/__down?bytes=10000000"]
-upload_endpoints = ["https://speed.cloudflare.com/__up"]
-timeout_secs = 30
-download_bytes = 10000000
-upload_bytes = 5000000
-history_size = 10
-min_interval_secs = 60

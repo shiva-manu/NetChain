@@ -5,8 +5,6 @@
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -165,48 +163,67 @@ pub fn create_event_channel() -> broadcast::Sender<WsEvent> {
     tx
 }
 
-/// Start the WebSocket server.
-/// `event_tx` is used to subscribe to events via `event_tx.subscribe()`.
-pub async fn start_ws_server(
-    bind_addr: &str,
-    port: u16,
+/// Answer an HTTP `GET /ws` with a WebSocket upgrade and serve live events on it.
+/// Returns `None` if the request is not a valid WebSocket upgrade.
+pub fn upgrade(
+    mut req: hyper::Request<hyper::body::Incoming>,
     event_tx: broadcast::Sender<WsEvent>,
-) -> anyhow::Result<()> {
-    let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-    let listener = TcpListener::bind(addr).await?;
-
-    info!(address = %addr, "websocket server listening");
-
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let event_tx = event_tx.clone();
-
-        tokio::spawn(async move {
-            let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-                max_message_size: Some(MAX_WS_MESSAGE_BYTES),
-                max_frame_size: Some(MAX_WS_FRAME_BYTES),
-                ..Default::default()
-            };
-
-            match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
-                Ok(ws_stream) => {
-                    info!(peer = %peer_addr, "websocket client connected");
-                    handle_ws_connection(ws_stream, event_tx, peer_addr).await;
-                    info!(peer = %peer_addr, "websocket client disconnected");
-                }
-                Err(e) => {
-                    warn!(peer = %peer_addr, error = %e, "websocket handshake failed");
-                }
-            }
-        });
+) -> Option<hyper::Response<http_body_util::Full<hyper::body::Bytes>>> {
+    use hyper::header::{
+        CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+    };
+    let headers = req.headers();
+    let wants_upgrade = headers
+        .get(UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let version_ok = headers
+        .get(SEC_WEBSOCKET_VERSION)
+        .is_some_and(|v| v.as_bytes() == b"13");
+    let key = headers.get(SEC_WEBSOCKET_KEY)?.as_bytes().to_vec();
+    if !wants_upgrade || !version_ok {
+        return None;
     }
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(&key);
+    let upgrade = hyper::upgrade::on(&mut req);
+
+    tokio::spawn(async move {
+        match upgrade.await {
+            Ok(upgraded) => {
+                let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                    max_message_size: Some(MAX_WS_MESSAGE_BYTES),
+                    max_frame_size: Some(MAX_WS_FRAME_BYTES),
+                    ..Default::default()
+                };
+                let ws_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                    hyper_util::rt::TokioIo::new(upgraded),
+                    tokio_tungstenite::tungstenite::protocol::Role::Server,
+                    Some(config),
+                )
+                .await;
+                info!("websocket client connected");
+                handle_ws_connection(ws_stream, event_tx).await;
+                info!("websocket client disconnected");
+            }
+            Err(e) => warn!(error = %e, "websocket upgrade failed"),
+        }
+    });
+
+    hyper::Response::builder()
+        .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header(SEC_WEBSOCKET_ACCEPT, accept)
+        .body(http_body_util::Full::new(hyper::body::Bytes::new()))
+        .ok()
 }
 
-async fn handle_ws_connection(
-    ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+async fn handle_ws_connection<S>(
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
     event_tx: broadcast::Sender<WsEvent>,
-    peer_addr: SocketAddr,
-) {
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let (mut ws_sink, mut ws_source) = ws_stream.split();
     let mut event_rx = event_tx.subscribe();
     let mut subscribed_topics: HashSet<WsTopic> = HashSet::new();
@@ -222,7 +239,7 @@ async fn handle_ws_connection(
         ))
         .await
     {
-        warn!(peer = %peer_addr, error = %e, "failed to send welcome");
+        warn!(error = %e, "failed to send welcome");
         return;
     }
 
@@ -283,7 +300,7 @@ async fn handle_ws_connection(
                         // Ignore other message types (binary, pong, frame)
                     }
                     Some(Err(e)) => {
-                        warn!(peer = %peer_addr, error = %e, "websocket receive error");
+                        warn!(error = %e, "websocket receive error");
                         break;
                     }
                 }
@@ -301,7 +318,7 @@ async fn handle_ws_connection(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(peer = %peer_addr, skipped = n, "websocket client lagged, skipped events");
+                        warn!(skipped = n, "websocket client lagged, skipped events");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;

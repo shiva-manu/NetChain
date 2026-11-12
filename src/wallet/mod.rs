@@ -207,13 +207,6 @@ impl Wallet {
             signing_key,
         })
     }
-
-    /// Load wallet by address from wallet directory (encrypted)
-    pub fn load_by_address(wallet_dir: &PathBuf, address: &str, password: &str) -> Result<Self> {
-        let filename = format!("{}.json", address);
-        let filepath = wallet_dir.join(&filename);
-        Self::load_encrypted(&filepath, password)
-    }
 }
 
 /// Get the default wallet directory
@@ -277,8 +270,11 @@ mod tests {
             .unwrap();
 
         // Load with correct password
-        let loaded =
-            Wallet::load_by_address(&wallet_dir, &original_address, "my_secure_password").unwrap();
+        let loaded = Wallet::load_encrypted(
+            &wallet_dir.join(format!("{}.json", original_address)),
+            "my_secure_password",
+        )
+        .unwrap();
 
         assert_eq!(loaded.name, "test_wallet");
         assert_eq!(loaded.address, original_address);
@@ -296,7 +292,10 @@ mod tests {
             .unwrap();
 
         // Load with wrong password should fail
-        let result = Wallet::load_by_address(&wallet_dir, &wallet.address, "wrong_password");
+        let result = Wallet::load_encrypted(
+            &wallet_dir.join(format!("{}.json", wallet.address)),
+            "wrong_password",
+        );
         assert!(result.is_err());
     }
 
@@ -319,7 +318,10 @@ mod tests {
         value["nonce"] = serde_json::json!("00"); // 1 byte nonce
         fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-        let result = Wallet::load_by_address(&wallet_dir, &address, "my_secure_password");
+        let result = Wallet::load_encrypted(
+            &wallet_dir.join(format!("{}.json", address)),
+            "my_secure_password",
+        );
         assert!(result.is_err());
     }
 

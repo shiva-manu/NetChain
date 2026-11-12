@@ -288,6 +288,9 @@ pub struct P2PConfig {
     pub port: u16,
     pub keypair: identity::Keypair,
     pub bootnodes: Vec<Multiaddr>,
+    /// Publicly reachable addresses of this node (e.g. a Railway TCP proxy), advertised to
+    /// peers via identify so they can dial back.
+    pub external_addrs: Vec<Multiaddr>,
     pub enable_mdns: bool,
     /// Genesis hash; used to namespace gossip topics.
     pub network_id: String,
@@ -312,7 +315,10 @@ impl P2PService {
         let local_key = config.keypair;
         let peer_id = PeerId::from(local_key.public());
 
-        let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
+        // DNS resolution lets bootnodes be hostnames (`/dns4/x.proxy.rlwy.net/tcp/1234`,
+        // `/dns/node1.railway.internal/tcp/30333`).
+        let tcp = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+        let transport = libp2p::dns::tokio::Transport::system(tcp)?
             .upgrade(libp2p::core::upgrade::Version::V1)
             .authenticate(noise::Config::new(&local_key)?)
             .multiplex(yamux::Config::default())
@@ -385,6 +391,14 @@ impl P2PService {
         );
 
         swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", config.port).parse()?)?;
+        // IPv6 too (Railway private networking is IPv6 in older environments). Not fatal.
+        if let Err(e) = swarm.listen_on(format!("/ip6/::/tcp/{}", config.port).parse()?) {
+            debug!(error = %e, "IPv6 listen unavailable");
+        }
+        for addr in config.external_addrs {
+            info!(%addr, "advertising external address");
+            swarm.add_external_address(addr);
+        }
 
         let shared_state = Arc::new(P2PSharedState::new());
         let (command_tx, command_rx) = mpsc::unbounded_channel();

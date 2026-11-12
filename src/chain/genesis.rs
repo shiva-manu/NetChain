@@ -69,8 +69,13 @@ impl GenesisSpec {
     pub fn load(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read genesis file {}", path.display()))?;
-        let spec: Self = serde_json::from_str(&contents)
-            .with_context(|| format!("failed to parse genesis file {}", path.display()))?;
+        Self::from_json(&contents)
+            .with_context(|| format!("invalid genesis file {}", path.display()))
+    }
+
+    /// Parse and validate a genesis spec from JSON text.
+    pub fn from_json(json: &str) -> Result<Self> {
+        let spec: Self = serde_json::from_str(json).context("genesis is not valid JSON")?;
         spec.validate()?;
         Ok(spec)
     }

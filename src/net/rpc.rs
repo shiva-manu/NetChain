@@ -8,16 +8,11 @@ use hyper::header::{
     HeaderValue, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE,
 };
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::blockchain::Blockchain;
 use crate::mempool::Mempool;
@@ -869,8 +864,8 @@ async fn handle_rpc_request(rpc_state: Arc<RpcState>, request: RpcRequest) -> Rp
     }
 }
 
-/// HTTP request handler
-async fn handle_request(
+/// Handle a JSON-RPC (`POST /rpc`) or REST (`GET /api/v1/*`) request.
+pub async fn handle_request(
     rpc_state: Arc<RpcState>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
@@ -943,29 +938,4 @@ async fn handle_request(
     let json = serde_json::to_string(&response).unwrap();
 
     Ok(json_response(StatusCode::OK, json))
-}
-
-/// Start the RPC server
-pub async fn start_rpc_server(rpc_state: Arc<RpcState>, bind_addr: &str, port: u16) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-    let listener = TcpListener::bind(addr).await?;
-
-    info!(address = %addr, "rpc server listening");
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let rpc_state = rpc_state.clone();
-
-        tokio::spawn(async move {
-            let service = service_fn(move |req| {
-                let rpc_state = rpc_state.clone();
-                async move { handle_request(rpc_state, req).await }
-            });
-
-            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                error!(error = %e, "rpc connection error");
-            }
-        });
-    }
 }

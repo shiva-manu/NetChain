@@ -219,6 +219,7 @@ impl Transaction {
     }
 
     /// Create a proposal with an executable action
+    #[cfg(test)]
     pub fn create_proposal_with_action(
         sender: String,
         fee: u64,
