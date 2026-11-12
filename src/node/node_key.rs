@@ -42,15 +42,20 @@ pub fn load_or_create(path: &Path) -> Result<SigningKey> {
 pub fn load(path: &Path) -> Result<SigningKey> {
     let mut contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read key file {}", path.display()))?;
-    let decoded = hex::decode(contents.trim());
+    let key = from_hex(&contents).with_context(|| format!("bad key file {}", path.display()));
     contents.zeroize();
-    let mut bytes = decoded.with_context(|| format!("key file {} is not hex", path.display()))?;
-    let secret: [u8; 32] = bytes
+    key
+}
+
+/// Parse a hex-encoded 32-byte Ed25519 secret.
+pub fn from_hex(secret_hex: &str) -> Result<SigningKey> {
+    let mut bytes = hex::decode(secret_hex.trim()).map_err(|_| anyhow!("key is not hex"))?;
+    let secret: Result<[u8; 32]> = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow!("key file {} must contain 32 bytes", path.display()))?;
+        .map_err(|_| anyhow!("key must be 32 bytes (64 hex characters)"));
     bytes.zeroize();
-    Ok(SigningKey::from_bytes(&secret))
+    Ok(SigningKey::from_bytes(&secret?))
 }
 
 fn write_secret(path: &Path, key: &SigningKey) -> Result<()> {
@@ -117,6 +122,15 @@ mod tests {
         let created = load_or_create(&path).unwrap();
         let loaded = load_or_create(&path).unwrap();
         assert_eq!(created.to_bytes(), loaded.to_bytes());
+    }
+
+    #[test]
+    fn hex_keys_parse_and_reject_garbage() {
+        let key = generate_ed25519_keypair();
+        let parsed = from_hex(&hex::encode(key.to_bytes())).unwrap();
+        assert_eq!(parsed.to_bytes(), key.to_bytes());
+        assert!(from_hex("zz").is_err());
+        assert!(from_hex("abcd").is_err());
     }
 
     #[test]

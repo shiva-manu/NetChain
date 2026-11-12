@@ -1,3 +1,5 @@
+> **Superseded:** NetChain now deploys on Railway, see [RAILWAY.md](../RAILWAY.md). This AWS guide describes the old node layout (separate RPC/monitoring/WebSocket ports) and is kept only for tearing down an existing EC2 setup.
+
 # NetChain AWS EC2 Deployment Guide
 
 This guide will walk you through deploying the NetChain node on an AWS EC2 instance.

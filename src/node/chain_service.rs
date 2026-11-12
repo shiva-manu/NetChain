@@ -495,7 +495,7 @@ mod tests {
 
     fn service(spec: &GenesisSpec) -> (ChainService, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(Storage::open(&dir.path().to_path_buf()).unwrap());
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
         let (ws_tx, _) = broadcast::channel(64);
         (
             ChainService::load(spec.clone(), storage, ws_tx).unwrap(),
@@ -608,7 +608,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let receiver = "a".repeat(40);
         {
-            let storage = Arc::new(Storage::open(&dir.path().to_path_buf()).unwrap());
+            let storage = Arc::new(Storage::open(dir.path()).unwrap());
             let (ws_tx, _) = broadcast::channel(64);
             let svc = ChainService::load(spec.clone(), storage, ws_tx).unwrap();
             let sender = node_key::address_of(&keys[0]);
@@ -625,7 +625,7 @@ mod tests {
             produce_n(&svc, &keys, Utc::now().timestamp() - 100, 3).await;
             assert_eq!(svc.state.lock().await.get_balance(&receiver), 42);
         }
-        let storage = Arc::new(Storage::open(&dir.path().to_path_buf()).unwrap());
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
         let (ws_tx, _) = broadcast::channel(64);
         let svc = ChainService::load(spec.clone(), storage, ws_tx).unwrap();
         assert_eq!(svc.height().await, 3);
@@ -635,7 +635,7 @@ mod tests {
         drop(svc);
         let mut other = spec.clone();
         other.chain_id = "other".into();
-        let storage = Arc::new(Storage::open(&dir.path().to_path_buf()).unwrap());
+        let storage = Arc::new(Storage::open(dir.path()).unwrap());
         let (ws_tx, _) = broadcast::channel(64);
         assert!(ChainService::load(other, storage, ws_tx).is_err());
     }

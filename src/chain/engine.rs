@@ -52,7 +52,8 @@ use crate::transaction::SignedTransaction;
 pub const BPS: u64 = 10_000;
 /// Blocks timestamped further than this into the future are rejected.
 pub const MAX_FUTURE_DRIFT_SECS: i64 = 15;
-/// Upper bound on missed slots accounted per block (bounds work after long outages).
+/// Longest gap between blocks whose empty slots count as missed. Longer gaps are treated as
+/// network-wide outages and penalize nobody (this also bounds the work per block).
 pub const MAX_MISSED_SLOTS_ACCOUNTED: u64 = 64;
 /// Uptime EWMA: each produced/missed slot keeps 95% of the old value.
 pub const UPTIME_KEEP_PERCENT: u64 = 95;
@@ -170,6 +171,7 @@ pub fn slot_at(timestamp_secs: i64, interval_secs: u64) -> u64 {
 }
 
 /// Start time (unix seconds) of a slot.
+#[cfg(test)]
 pub fn slot_start(slot: u64, interval_secs: u64) -> i64 {
     slot.saturating_mul(interval_secs.max(1)) as i64
 }
@@ -427,8 +429,12 @@ fn record_liveness(parent: &Block, parent_state: &State, block: &Block, next: &m
     let parent_slot = slot_at(timestamp_secs(&parent.timestamp), interval);
     let slot = slot_at(timestamp_secs(&block.timestamp), interval);
 
-    let first_missed = (parent_slot + 1).max(slot.saturating_sub(MAX_MISSED_SLOTS_ACCOUNTED));
-    if first_missed < slot {
+    // A gap longer than MAX_MISSED_SLOTS_ACCOUNTED means nobody was producing (a network-wide
+    // outage, or a genesis created long before launch): that is not any single validator's
+    // fault, so nobody is penalized for it.
+    let gap = slot.saturating_sub(parent_slot + 1);
+    let first_missed = parent_slot + 1;
+    if gap > 0 && gap <= MAX_MISSED_SLOTS_ACCOUNTED {
         let now = timestamp_secs(&parent.timestamp).max(0) as u64;
         let scores = validator_scores(parent_state, now);
         for missed_slot in first_missed..slot {
@@ -465,6 +471,7 @@ pub fn apply_block(
 ) -> Result<BlockOutcome, BlockError> {
     let block_time = timestamp_secs(&block.timestamp).max(0) as u64;
     let mut next = parent_state.clone();
+    next.block_height = block.index;
     let mut events = Vec::new();
 
     for (index, tx) in block.transactions.iter().enumerate() {
@@ -515,6 +522,7 @@ pub fn build_block(
 
     // Keep only transactions that apply cleanly in order.
     let mut scratch = parent_state.clone();
+    scratch.block_height = parent.index + 1;
     let max = parent_state.chain_params.max_txs_per_block;
     let mut txs = Vec::with_capacity(candidate_txs.len().min(max));
     for tx in candidate_txs {
@@ -770,6 +778,25 @@ mod tests {
         let signed = SignedTransaction::sign_with_keypair(&tx, &n.keys[2]);
         state.apply_transaction_at(&signed, 1).unwrap();
         assert!(active_validators(&state).contains(&offline));
+    }
+
+    #[test]
+    fn network_wide_outage_penalizes_nobody() {
+        let n = net(3);
+        let genesis = n.spec.genesis_block();
+        let state = n.spec.build_state();
+        let interval = state.chain_params.block_interval_secs;
+        // First block a day after genesis (e.g. the network launched late).
+        let slot = slot_at(genesis.timestamp.timestamp(), interval) + 86_400 / interval;
+        let proposer = proposer_for_slot(&genesis, &state, slot).unwrap();
+        let ts = Utc.timestamp_opt(slot_start(slot, interval), 0).unwrap();
+        let (_, outcome) = build_block(&genesis, &state, vec![], n.key_for(&proposer), ts).unwrap();
+        assert_eq!(active_validators(&outcome.state).len(), 3);
+        assert!(outcome
+            .state
+            .validator_stats
+            .values()
+            .all(|s| s.missed == 0));
     }
 
     #[test]

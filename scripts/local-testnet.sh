@@ -6,7 +6,7 @@
 #   scripts/local-testnet.sh stop    # stop all nodes
 #   scripts/local-testnet.sh reset   # stop and delete all testnet data
 #
-# Node N listens on p2p 3040N, RPC 860N, monitoring 960N, websocket 870N.
+# Node N listens on p2p 3040N and HTTP 860N (/rpc, /health, /metrics, /validators, /ws).
 # Nodes 2 and 3 find node 1 through its bootnode address (mDNS is disabled on purpose,
 # so this exercises the same path as nodes on different machines).
 set -euo pipefail
@@ -21,8 +21,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 node_env() {
   local n=$1
-  echo "DATA_DIR=$NET_DIR/node$n PORT=3040$n RPC_PORT=860$n NETCHAIN_MONITORING_PORT=960$n \
-NETCHAIN_WS_PORT=870$n NETCHAIN_GENESIS=$NET_DIR/genesis.json NETCHAIN_ENABLE_MDNS=false \
+  echo "DATA_DIR=$NET_DIR/node$n NETCHAIN_P2P_PORT=3040$n PORT=860$n \
+NETCHAIN_GENESIS=$NET_DIR/genesis.json NETCHAIN_ENABLE_MDNS=false \
 NETCHAIN_ATTEST_INTERVAL_SECS=${ATTEST_INTERVAL:-20} NETCHAIN_LOG_LEVEL=${LOG_LEVEL:-info}"
 }
 
@@ -70,7 +70,7 @@ rpc() {
 cmd_status() {
   for n in "${NODES[@]}"; do
     info=$(rpc "$n" '{"method":"get_chain_info"}' || true)
-    peers=$(curl -s "http://127.0.0.1:960$n/health" | sed -n 's/.*"peer_count":\([0-9]*\).*/\1/p' || true)
+    peers=$(curl -s "http://127.0.0.1:860$n/health" | sed -n 's/.*"peer_count":\([0-9]*\).*/\1/p' || true)
     height=$(echo "$info" | sed -n 's/.*"height":\([0-9]*\).*/\1/p')
     tip=$(echo "$info" | sed -n 's/.*"latest_block_hash":"\([0-9a-f]\{12\}\).*/\1/p')
     echo "node$n height=${height:-down} tip=${tip:--} peers=${peers:--}"

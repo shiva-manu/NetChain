@@ -35,7 +35,8 @@ src/
 │   ├── genesis.rs       # Genesis spec (JSON) -> genesis block + state
 │   ├── block.rs         # Signed blocks, Merkle root
 │   ├── blockchain.rs    # Block list + stateless block checks
-│   ├── state.rs         # Accounts, staking, governance, tokens, attestations, validator stats
+│   ├── state.rs         # Accounts, staking, governance, tokens, contracts, attestations, validator stats
+│   ├── vm.rs            # WASM smart-contract VM (wasmi, gas-metered)
 │   └── transaction.rs   # Signed transactions
 ├── node/
 │   ├── chain_service.rs # Block import, sync, fork choice/reorg, block production, persistence
@@ -43,11 +44,11 @@ src/
 │   ├── mempool.rs       # Fee-ordered mempool (several queued txs per sender)
 │   └── storage.rs       # sled block store
 ├── net/
-│   ├── p2p.rs           # libp2p: gossipsub, request-response sync/probes, ping, identify+Kademlia, mDNS
+│   ├── http.rs          # One HTTP port: /rpc, /api/v1, /health, /metrics, /validators, /genesis, /ws
+│   ├── p2p.rs           # libp2p: gossipsub, request-response sync/probes, ping, identify+Kademlia, DNS, mDNS
 │   ├── rpc.rs           # JSON-RPC + REST API, faucet
 │   ├── websocket.rs     # Live events
-│   └── monitoring.rs    # /health, /metrics, /validators
-├── poi/                 # Speed-test measurement (informational) and earlier off-chain PoI experiments
+│   └── monitoring.rs    # Health, Prometheus metrics, validator report
 └── wallet/              # Encrypted keystore
 ```
 
@@ -76,9 +77,16 @@ scripts/local-testnet.sh stop
 scripts/local-testnet.sh reset    # delete .testnet/
 ```
 
-Node N serves RPC on `127.0.0.1:860N`. Nodes 2 and 3 only know node 1's address and discover each other through the DHT. Try stopping a node: the chain keeps going, the stopped validator is jailed after a few missed slots, and when you restart it, it catches up and unjails itself.
+Node N serves HTTP on `127.0.0.1:860N`. Nodes 2 and 3 only know node 1's address and discover each other through the DHT. Try stopping a node: the chain keeps going, the stopped validator is jailed after a few missed slots, and when you restart it, it catches up and unjails itself.
 
-## Running a network across machines
+## Deploying on Railway
+
+See **[RAILWAY.md](RAILWAY.md)**. In short:
+1. Run `scripts/railway-setup.sh` to create validator keys and `config/genesis.json`.
+2. Create one Railway service per validator from this repo. Each needs a volume at `/data` and its generated variables.
+3. Give node1 a public domain on port 8545 and a TCP proxy on port 30333.
+
+## Running a network on your own machines
 
 1. On each validator machine, create the node key and note the address:
    ```bash
@@ -97,7 +105,7 @@ Node N serves RPC on `127.0.0.1:860N`. Nodes 2 and 3 only know node 1's address 
    NETCHAIN_BOOTNODES=/ip4/<NODE_1_PUBLIC_IP>/tcp/30333 \
    netchain run
    ```
-   Open TCP port 30333 (P2P) on every node. RPC (8545), WebSocket (8546) and monitoring (9090) bind to localhost unless you set `NETCHAIN_RPC_BIND_ADDR=0.0.0.0` (and the matching variables for WebSocket and monitoring).
+   Open TCP port 30333 (P2P) on every node. The HTTP gateway (8545) binds to localhost unless you set `NETCHAIN_HTTP_BIND_ADDR=0.0.0.0` (the Docker image binds all interfaces).
 
 New validators can join later without a new genesis:
 1. Start a node with the network's genesis file and a bootnode.
@@ -111,12 +119,15 @@ Loaded from `config/default.toml` (override the path with `NETCHAIN_CONFIG`). En
 
 | Variable | Meaning |
 |---|---|
-| `DATA_DIR` | Data directory (node key, genesis for dev chains, block database) |
-| `NETCHAIN_GENESIS` | Genesis file of the network to join |
-| `NETCHAIN_BOOTNODES` | Comma-separated multiaddrs, e.g. `/ip4/1.2.3.4/tcp/30333` |
+| `DATA_DIR` | Data directory (node key, dev genesis, block database) |
+| `PORT` | HTTP gateway port (default 8545) |
+| `NETCHAIN_HTTP_BIND_ADDR` | HTTP bind address (`127.0.0.1`; `::` for all interfaces) |
+| `NETCHAIN_P2P_PORT` | P2P port (default 30333) |
+| `NETCHAIN_NODE_KEY` | Node key as hex, instead of `<data_dir>/node_key` |
+| `NETCHAIN_GENESIS` / `NETCHAIN_GENESIS_JSON` / `NETCHAIN_GENESIS_URL` | Network to join: file, inline JSON, or another node's `/genesis` |
+| `NETCHAIN_BOOTNODES` | Comma-separated multiaddrs, e.g. `/ip4/1.2.3.4/tcp/30333` or `/dns4/host/tcp/30333` |
+| `NETCHAIN_EXTERNAL_ADDRS` | Public addresses of this node to advertise (Railway's TCP proxy is detected automatically) |
 | `NETCHAIN_ENABLE_MDNS` | Local-network discovery (`true`/`false`) |
-| `PORT`, `RPC_PORT`, `NETCHAIN_WS_PORT`, `NETCHAIN_MONITORING_PORT` | Ports |
-| `NETCHAIN_RPC_BIND_ADDR`, `NETCHAIN_WS_BIND_ADDR`, `NETCHAIN_MONITORING_BIND_ADDR` | Bind addresses |
 | `NETCHAIN_FAUCET_ENABLED`, `NETCHAIN_FAUCET_KEY_FILE`, `NETCHAIN_FAUCET_AMOUNT` | Faucet |
 | `NETCHAIN_ATTEST_INTERVAL_SECS` | How often validators measure each other |
 | `NETCHAIN_BLOCK_INTERVAL_SECS`, `NETCHAIN_BLOCK_REWARD`, `NETCHAIN_MAX_TXS_PER_BLOCK`, `NETCHAIN_STAKE_WEIGHT` | Chain parameters for a newly created **dev** genesis only (a shared network takes them from its genesis file) |
@@ -124,24 +135,35 @@ Loaded from `config/default.toml` (override the path with `NETCHAIN_CONFIG`). En
 
 ## Interfaces
 
-- **P2P** `0.0.0.0:30333`
-- **RPC** `127.0.0.1:8545`: `POST /rpc` with `{"method": ..., "params": {...}}`
-  - Methods: `get_balance`, `get_nonce` (next usable nonce, including pending transactions), `send_transaction`, `get_chain_info`, `get_mempool_size`, `get_block`, `get_blocks`, `get_account`, `get_staking_info`, `get_proposals`, `get_proposal`, `get_chain_params`, `get_validators`, `get_node_info`, `faucet_tokens`, plus contract and token queries.
-  - REST reads: `GET /api/v1/{status,blocks,transactions,accounts,proposals,staking,chain-params,tokens,nfts}`.
-- **WebSocket** `ws://127.0.0.1:8546`: subscribe with `{"action":"subscribe","topics":["new_blocks","new_transactions","proposals","slashing"]}`.
-- **Monitoring** `127.0.0.1:9090`:
-  - `/health`: height, peers, validator counts, whether this node is a validator, and age of the latest block.
-  - `/validators`: per-validator stake, PoI, uptime, attestations and jailed status.
-  - `/metrics`: Prometheus format.
+- **P2P** `0.0.0.0:30333` (TCP)
+- **HTTP gateway** `127.0.0.1:8545` serves everything on one port:
+  - `POST /rpc` with `{"method": ..., "params": {...}}`. Methods:
+    - `get_balance`, `get_nonce` (next usable nonce, including pending transactions), `get_account`, `get_staking_info`
+    - `send_transaction`, `faucet_tokens`
+    - `get_chain_info`, `get_mempool_size`, `get_block`, `get_blocks`, `get_chain_params`
+    - `get_proposals`, `get_proposal`, `get_validators`, `get_node_info`
+    - contract and token queries
+  - `GET /api/v1/{status,blocks,transactions,accounts,proposals,staking,chain-params,tokens,nfts}`: REST reads.
+  - `GET /health`: height, peers, validator counts, whether this node is a validator, and age of the latest block.
+  - `GET /metrics`: Prometheus format.
+  - `GET /validators`: stake, PoI, uptime, attestations and jailed status per validator.
+  - `GET /genesis`: this network's genesis file, which new nodes can join from.
+  - `GET /ws`: WebSocket. Subscribe with `{"action":"subscribe","topics":["new_blocks","new_transactions","proposals","slashing"]}`.
 
 Native transactions: `Transfer`, `Stake`, `Unstake`, `CreateProposal`, `VoteProposal`, `AttestMetrics`, `Unjail`, token and NFT operations, contract deploy/call.
+
+Smart contracts are WASM modules run by `wasmi` with gas metering:
+- **Host functions:** contracts can read and write their own storage, emit events, and read the caller, value, balances and block height.
+- **Successful call:** commits the storage writes and charges only the gas used.
+- **Failed call:** changes nothing, charges the full gas limit, and returns the value sent to the caller.
+- **Gas price:** one gas costs one NCN, and storage writes also cost gas per byte.
 
 Governance: a passed proposal can change the block reward, block interval, max transactions per block and stake weight. Proposals execute deterministically in id order.
 
 ## Docker
 
 ```bash
-docker compose up --build
+docker compose up --build     # HTTP on :8545, P2P on :30333, data in ./data
 ```
 
 ## Development
@@ -157,7 +179,7 @@ cargo clippy --all-targets
 This is a testnet-grade system, not production money infrastructure:
 
 - **Finality is probabilistic** (longest chain). There is no BFT finality gadget yet, so a deep reorg is possible in principle.
-- **Smart contract calls are not executed yet.** `CallContract` charges gas but does not run the WASM VM.
+- **Contracts are basic.** They can't call other contracts, and arguments are raw little-endian `i64` values.
 - **Equivocation is not slashed.** Double-signing in one slot is not punished. Signed blocks make evidence possible, but there is no evidence transaction yet.
 - **Colluding attesters can skew PoI.** A colluding majority of validators can inflate each other's scores; the median only protects against a minority.
 - **Replay is the only state store.** State is rebuilt by replaying blocks at startup and during a reorg. That is simple and robust, but slow for very long chains; state snapshots would fix it.

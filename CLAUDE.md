@@ -32,14 +32,14 @@ cd website && npm run build              # Production build
 
 ### Docker
 ```bash
-docker compose up --build                # Exposes 30333 (P2P), 8545 (RPC), 9090 (monitoring)
+docker compose up --build                # Exposes 30333 (P2P), 8545 (HTTP gateway)
 ```
 
 ## Architecture
 
 ### Dual Binary, Shared Library
 
-The project produces two binaries (`netchain` node and `netchain-wallet` CLI) that share core logic through the library crate. The library uses `#[path = ...]` attributes in `src/lib.rs` to re-export modules from subdirectories under flat names — e.g., `netchain::block` maps to `src/chain/block.rs`, `netchain::consensus` maps to `src/poi/consensus.rs`. This means import paths don't match the filesystem layout.
+The project produces two binaries (`netchain` node and `netchain-wallet` CLI) that share core logic through the library crate. The library uses `#[path = ...]` attributes in `src/lib.rs` to re-export modules from subdirectories under flat names — e.g., `netchain::block` maps to `src/chain/block.rs`, `netchain::chain_service` maps to `src/node/chain_service.rs`. This means import paths don't match the filesystem layout.
 
 ### Module Map (lib.rs path → filesystem)
 
@@ -48,21 +48,18 @@ The project produces two binaries (`netchain` node and `netchain-wallet` CLI) th
 | `netchain::block` | `src/chain/block.rs` |
 | `netchain::blockchain` | `src/chain/blockchain.rs` |
 | `netchain::engine` | `src/chain/engine.rs` |
+| `netchain::vm` | `src/chain/vm.rs` |
+| `netchain::contract` | `src/chain/contract.rs` |
+| `netchain::token` | `src/chain/token.rs` |
 | `netchain::genesis` | `src/chain/genesis.rs` |
 | `netchain::state` | `src/chain/state.rs` |
 | `netchain::transaction` | `src/chain/transaction.rs` |
 | `netchain::config` | `src/app/config.rs` |
-| `netchain::consensus` | `src/poi/consensus.rs` |
-| `netchain::measurement` | `src/poi/measurement.rs` |
-| `netchain::metrics_aggregator` | `src/poi/metrics_aggregator.rs` |
-| `netchain::anti_gaming` | `src/poi/anti_gaming.rs` |
-| `netchain::epoch_manager` | `src/poi/epoch_manager.rs` |
-| `netchain::metric_challenge` | `src/poi/metric_challenge.rs` |
 | `netchain::p2p` | `src/net/p2p.rs` |
+| `netchain::http` | `src/net/http.rs` |
 | `netchain::rpc` | `src/net/rpc.rs` |
 | `netchain::websocket` | `src/net/websocket.rs` |
 | `netchain::monitoring` | `src/net/monitoring.rs` |
-| `netchain::dht` | `src/net/dht.rs` |
 | `netchain::mempool` | `src/node/mempool.rs` |
 | `netchain::chain_service` | `src/node/chain_service.rs` |
 | `netchain::node_key` | `src/node/node_key.rs` |
@@ -79,7 +76,7 @@ The project produces two binaries (`netchain` node and `netchain-wallet` CLI) th
 - **Uptime/jailing**: `State::validator_stats` EWMA updated per block (produced / missed slots); uptime < 50% jails the validator until it sends `Unjail` (nodes do this automatically).
 - **Blocks** are signed by the proposer's node key; `validator` is its address (`hex(sha256(pubkey)[..20])`).
 
-`src/poi/consensus.rs` (`PoiScorer`), `metrics_aggregator`, `anti_gaming`, `epoch_manager`, `metric_challenge` and `dht` are earlier off-chain experiments and are **not** used by the node or consensus.
+Smart contracts: `CallContract` runs the WASM module through `vm::execute` (wasmi fuel + host-function gas). Failed calls charge the full gas limit and change nothing else. Contract storage lives in `State::contract_storage` (the code is under the protected `__code` key).
 
 ### Key Data Flow
 
@@ -87,7 +84,7 @@ The project produces two binaries (`netchain` node and `netchain-wallet` CLI) th
 2. **Block production**: every 500ms the node asks `ChainService::try_produce`; if its key owns the current slot it builds, applies and gossips a signed block
 3. **Import**: gossiped blocks extending the tip go through `engine::import_block`; anything else triggers a direct request-response sync. `ChainService::import_sync_blocks` extends, buffers a competing fork, or reorgs to a strictly longer fully-validated fork
 4. **State** is never persisted separately: startup replays and re-verifies all stored blocks from the genesis spec
-5. **Networking** (`src/net/p2p.rs`): gossipsub (topics namespaced by genesis hash), request-response JSON (sync, bandwidth probes), ping (RTT), identify + Kademlia (peer discovery from bootnodes), optional mDNS
+5. **Networking** (`src/net/p2p.rs`): gossipsub (topics namespaced by genesis hash), request-response JSON (sync, bandwidth probes), ping (RTT), identify + Kademlia (peer discovery from bootnodes), DNS multiaddrs, optional mDNS. All client-facing HTTP (RPC, REST, monitoring, `/genesis`, WebSocket `/ws`) is served on one port by `src/net/http.rs`
 6. **Identity**: `<data_dir>/node_key` is the validator key, block-signing key and libp2p identity; `node_key::address_from_peer_id` maps peers to on-chain addresses
 7. **Governance** proposals execute in proposal-id order at block time
 
@@ -97,7 +94,11 @@ Uses `sled` embedded database under `<data_dir>/db`. `Storage` persists blocks p
 
 ### Configuration
 
-Loaded from `config/default.toml` by default. Override with `NETCHAIN_CONFIG` env var. Env overrides are documented in the README. Consensus parameters come from the genesis file (`NETCHAIN_GENESIS`); without one the node creates a single-validator dev genesis from the `[producer]` values. `scripts/local-testnet.sh` runs a 3-validator network locally.
+Loaded from `config/default.toml` by default. Override with `NETCHAIN_CONFIG` env var. Env overrides are documented in the README. Consensus parameters come from the genesis file (`NETCHAIN_GENESIS`); without one the node creates a single-validator dev genesis from the `[producer]` values. `scripts/local-testnet.sh` runs a 3-validator network locally. `PORT` is the HTTP gateway port and `NETCHAIN_P2P_PORT` the libp2p port.
+
+### Deployment
+
+Railway is the deployment target (see `RAILWAY.md`): the root `Dockerfile` is auto-built, each validator is one service with a `/data` volume and a `NETCHAIN_NODE_KEY` variable, all load the committed `config/genesis.json` (generated by `scripts/railway-setup.sh`), and node1 exposes the public domain (port 8545) plus a TCP proxy (30333). There is intentionally no `railway.toml` (deprecated by Railway as of 2026-12-01). The `terraform/`, `deploy/` and AWS docs are legacy.
 
 ### Website
 

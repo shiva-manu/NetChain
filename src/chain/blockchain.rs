@@ -43,18 +43,6 @@ impl Blockchain {
         self.chain.last().expect("chain always has genesis")
     }
 
-    /// Structural validation of a candidate block against our current tip.
-    pub fn validate_next_block(&self, block: &Block) -> Result<(), String> {
-        validate_block_structure(self.last_block(), block)
-    }
-
-    /// Structural validation of every stored block (hash links, hashes, signatures).
-    pub fn is_valid(&self) -> bool {
-        self.chain
-            .windows(2)
-            .all(|w| validate_block_structure(&w[0], &w[1]).is_ok())
-    }
-
     pub fn height(&self) -> u64 {
         self.last_block().index
     }
@@ -69,10 +57,6 @@ impl Blockchain {
             .skip(start_height as usize)
             .take(limit)
             .collect()
-    }
-
-    pub fn get_blocks_from(&self, from_height: u64) -> Vec<&Block> {
-        self.chain.iter().skip(from_height as usize).collect()
     }
 
     /// Blocks in `[from_height, from_height + limit)`.
@@ -173,7 +157,6 @@ mod tests {
         let bc = Blockchain::new();
         assert_eq!(bc.chain.len(), 1);
         assert_eq!(bc.last_block().index, 0);
-        assert!(bc.is_valid());
     }
 
     #[test]
@@ -190,10 +173,9 @@ mod tests {
             bc.last_block().timestamp + Duration::seconds(15),
             &key,
         );
-        bc.validate_next_block(&block).unwrap();
+        validate_block_structure(bc.last_block(), &block).unwrap();
         bc.chain.push(block);
         assert_eq!(bc.height(), 1);
-        assert!(bc.is_valid());
     }
 
     #[test]
@@ -203,7 +185,7 @@ mod tests {
 
         let mut wrong_index = signed_child(bc.last_block(), &key);
         wrong_index.index = 5;
-        assert!(bc.validate_next_block(&wrong_index).is_err());
+        assert!(validate_block_structure(bc.last_block(), &wrong_index).is_err());
 
         let wrong_parent = Block::new_signed(
             1,
@@ -212,7 +194,7 @@ mod tests {
             bc.last_block().timestamp,
             &key,
         );
-        assert!(bc.validate_next_block(&wrong_parent).is_err());
+        assert!(validate_block_structure(bc.last_block(), &wrong_parent).is_err());
 
         let unsigned = Block::new_unsigned(
             1,
@@ -221,7 +203,7 @@ mod tests {
             "validator".into(),
             bc.last_block().timestamp,
         );
-        assert!(bc.validate_next_block(&unsigned).is_err());
+        assert!(validate_block_structure(bc.last_block(), &unsigned).is_err());
     }
 
     #[test]
@@ -239,6 +221,6 @@ mod tests {
             &key,
         );
         block.transactions[0].tx.amount = 1_000_000;
-        assert!(bc.validate_next_block(&block).is_err());
+        assert!(validate_block_structure(bc.last_block(), &block).is_err());
     }
 }

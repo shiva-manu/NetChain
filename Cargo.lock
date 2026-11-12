@@ -2275,7 +2275,6 @@ dependencies = [
  "argon2",
  "base64",
  "bincode",
- "bs58",
  "chrono",
  "clap",
  "dirs",

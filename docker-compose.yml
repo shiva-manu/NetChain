@@ -1,29 +1,17 @@
-version: "3.9"
-
 services:
   netchain:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "30333:30333"
-      - "8545:8545"
-      - "9090:9090"
-      - "8546:8546"
+      - "30333:30333" # P2P
+      - "8545:8545" # HTTP gateway: /rpc, /api/v1, /health, /metrics, /validators, /genesis, /ws
     environment:
-      NETCHAIN_CONFIG: /app/config/default.toml
-      NETCHAIN_RPC_BIND_ADDR: 0.0.0.0
-      NETCHAIN_MONITORING_BIND_ADDR: 0.0.0.0
-      NETCHAIN_WS_BIND_ADDR: 0.0.0.0
-      # To join an existing network instead of starting a private dev chain:
-      # NETCHAIN_GENESIS: /app/config/genesis.json
-      # NETCHAIN_BOOTNODES: /ip4/<BOOTNODE_IP>/tcp/30333
+      PORT: 8545
       NETCHAIN_LOG_LEVEL: info
-      DATA_DIR: /app/data
-      PORT: 30333
-      RPC_PORT: 8545
-      NETCHAIN_MONITORING_PORT: 9090
+      # To join an existing network instead of starting a private dev chain:
+      # NETCHAIN_GENESIS_URL: https://<existing-node>/genesis
+      # NETCHAIN_BOOTNODES: /dns4/<bootnode-host>/tcp/<port>
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config:ro
+      - ./data:/data
     restart: unless-stopped

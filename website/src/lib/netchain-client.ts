@@ -18,9 +18,13 @@ type RpcBody = {
   params?: unknown;
 };
 
-// Live NetChain node endpoints
-const DEFAULT_RPC_URL = "https://api.netchain.me";
-const DEFAULT_MONITORING_URL = "https://api.netchain.me";
+// Node endpoints: set VITE_NETCHAIN_* at build time (e.g. a Railway domain), otherwise the
+// public NetChain node. One node serves /rpc, /health, /metrics and /ws on the same host.
+const DEFAULT_RPC_URL = import.meta.env.VITE_NETCHAIN_RPC_URL || "https://api.netchain.me";
+const DEFAULT_MONITORING_URL = import.meta.env.VITE_NETCHAIN_MONITORING_URL || DEFAULT_RPC_URL;
+const DEFAULT_WS_URL =
+  import.meta.env.VITE_NETCHAIN_WS_URL ||
+  `${DEFAULT_RPC_URL.replace(/^http/, "ws").replace(/\/+$/, "")}/ws`;
 
 function trimTrailingSlash(url: string) {
   return url.replace(/\/+$/, "");
@@ -154,4 +158,4 @@ export class NetChainClient {
   }
 }
 
-export { DEFAULT_MONITORING_URL, DEFAULT_RPC_URL };
+export { DEFAULT_MONITORING_URL, DEFAULT_RPC_URL, DEFAULT_WS_URL };

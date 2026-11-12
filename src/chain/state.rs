@@ -5,7 +5,6 @@ use crate::token::{derive_nft_id, derive_token_id, NftInfo, TokenInfo, TokenRegi
 use crate::transaction::{ProposalAction, SignedTransaction, Transaction, TransactionType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 /// Errors that can occur during state transitions
@@ -153,6 +152,9 @@ pub struct MetricAttestation {
     pub at: u64,
 }
 
+/// Contract-storage key holding a contract's WASM code.
+pub const CONTRACT_CODE_KEY: &[u8] = b"__code";
+
 /// Bounds for attested metrics.
 pub const MAX_ATTESTED_RTT_MS: u64 = 60_000;
 pub const MAX_ATTESTED_THROUGHPUT_KBPS: u64 = 100_000_000;
@@ -286,28 +288,6 @@ pub struct SlashRecord {
 
 // ==================== Slashing Configuration ====================
 
-/// Slashing penalty configuration (amounts in basis points of staked balance, 10_000 = 100%).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SlashingConfig {
-    /// Penalty for producing an invalid block (basis points of stake).
-    pub invalid_block_penalty_bps: u64,
-    /// Penalty for anti-gaming metric fraud (basis points of stake).
-    pub metric_fraud_penalty_bps: u64,
-    /// Penalty for missing a block when selected (basis points of stake).
-    pub missed_block_penalty_bps: u64,
-}
-
-impl Default for SlashingConfig {
-    fn default() -> Self {
-        Self {
-            invalid_block_penalty_bps: 1_000, // 10% of stake
-            metric_fraud_penalty_bps: 500,    // 5% of stake
-            missed_block_penalty_bps: 100,    // 1% of stake
-        }
-    }
-}
-
 impl GovernanceProposal {
     pub fn total_votes(&self) -> u64 {
         self.yes_votes + self.no_votes
@@ -356,9 +336,6 @@ pub struct State {
     /// Audit trail of all slashing events.
     #[serde(default)]
     pub slashing_records: Vec<SlashRecord>,
-    /// Slashing penalty configuration.
-    #[serde(default)]
-    pub slashing_config: SlashingConfig,
     /// Deployed contracts: address -> ContractInfo
     #[serde(default)]
     pub contracts: HashMap<String, ContractInfo>,
@@ -368,6 +345,9 @@ pub struct State {
     /// Token registry for fungible and non-fungible tokens
     #[serde(default)]
     pub token_registry: TokenRegistry,
+    /// Height of the block being executed (contracts can read it).
+    #[serde(default)]
+    pub block_height: u64,
     /// Liveness stats per validator address.
     #[serde(default)]
     pub validator_stats: BTreeMap<String, ValidatorStats>,
@@ -386,10 +366,10 @@ impl State {
             next_proposal_id: 1,
             chain_params: ChainParams::default(),
             slashing_records: Vec::new(),
-            slashing_config: SlashingConfig::default(),
             contracts: HashMap::new(),
             contract_storage: HashMap::new(),
             token_registry: TokenRegistry::new(),
+            block_height: 0,
             validator_stats: BTreeMap::new(),
             metric_attestations: BTreeMap::new(),
         }
@@ -408,36 +388,13 @@ impl State {
             next_proposal_id: 1,
             chain_params: ChainParams::default(),
             slashing_records: Vec::new(),
-            slashing_config: SlashingConfig::default(),
             contracts: HashMap::new(),
             contract_storage: HashMap::new(),
             token_registry: TokenRegistry::new(),
+            block_height: 0,
             validator_stats: BTreeMap::new(),
             metric_attestations: BTreeMap::new(),
         }
-    }
-
-    /// Create state from existing accounts (for loading from storage)
-    pub fn from_accounts(accounts: HashMap<String, Account>) -> Self {
-        Self {
-            accounts,
-            stakes: HashMap::new(),
-            proposals: HashMap::new(),
-            next_proposal_id: 1,
-            chain_params: ChainParams::default(),
-            slashing_records: Vec::new(),
-            slashing_config: SlashingConfig::default(),
-            contracts: HashMap::new(),
-            contract_storage: HashMap::new(),
-            token_registry: TokenRegistry::new(),
-            validator_stats: BTreeMap::new(),
-            metric_attestations: BTreeMap::new(),
-        }
-    }
-
-    /// Get reference to all accounts (for saving to storage)
-    pub fn get_accounts(&self) -> &HashMap<String, Account> {
-        &self.accounts
     }
 
     pub fn get_staked_balance(&self, address: &str) -> u64 {
@@ -482,6 +439,7 @@ impl State {
     }
 
     /// Validate a signed transaction WITHOUT mutating state
+    #[cfg(test)]
     pub fn validate_transaction(&self, tx: &SignedTransaction) -> Result<(), StateError> {
         let now = current_unix_timestamp();
         self.validate_transaction_at(tx, now)
@@ -621,7 +579,7 @@ impl State {
                 wasm_code,
                 gas_limit,
             } => {
-                if wasm_code.is_empty() {
+                if wasm_code.is_empty() || crate::vm::validate_module(wasm_code).is_err() {
                     return Err(StateError::InvalidWasmModule);
                 }
                 if *gas_limit == 0 || *gas_limit > 10_000_000 {
@@ -794,6 +752,7 @@ impl State {
     }
 
     /// Apply a signed transaction (Mutates state)
+    #[cfg(test)]
     pub fn apply_transaction(
         &mut self,
         tx: &SignedTransaction,
@@ -951,7 +910,7 @@ impl State {
                     .contract_storage
                     .entry(contract_address.clone())
                     .or_default();
-                code_storage.insert(b"__code".to_vec(), wasm_code.clone());
+                code_storage.insert(CONTRACT_CODE_KEY.to_vec(), wasm_code.clone());
 
                 // Store contract info
                 self.contracts
@@ -976,50 +935,74 @@ impl State {
             TransactionType::CallContract {
                 contract_address,
                 function,
-                args: _,
+                args,
                 gas_limit,
             } => {
-                // Verify contract exists (already validated)
-                let _contract = self
-                    .contracts
-                    .get(contract_address)
-                    .expect("Contract must exist after validation");
-
-                // Load contract code
-                let _code = self
+                let mut storage = self
                     .contract_storage
                     .get(contract_address)
-                    .and_then(|storage| storage.get(b"__code".as_ref()))
                     .cloned()
                     .unwrap_or_default();
+                let code = storage.remove(CONTRACT_CODE_KEY).unwrap_or_default();
+                let balances = [t.sender.clone(), contract_address.clone()]
+                    .into_iter()
+                    .map(|addr| {
+                        let balance = self.get_balance(&addr);
+                        (addr, balance)
+                    })
+                    .collect();
+                let context = crate::vm::VmContext {
+                    caller: t.sender.clone(),
+                    contract_address: contract_address.clone(),
+                    gas_remaining: *gas_limit,
+                    block_height: self.block_height,
+                    storage,
+                    balances,
+                    value: t.amount,
+                };
 
-                // In a full implementation, we would execute the WASM code here
-                // using the vm::execute function. For now, we charge gas and
-                // emit the event. The actual VM execution will be integrated
-                // when the contract storage is fully wired.
+                let gas_used = match crate::vm::execute(&code, function, args, &context) {
+                    Ok(result) => {
+                        let contract_storage = self
+                            .contract_storage
+                            .entry(contract_address.clone())
+                            .or_default();
+                        for (key, value) in result.storage_changes {
+                            // The contract's own code is not writable from inside the VM.
+                            if key.as_slice() == CONTRACT_CODE_KEY {
+                                continue;
+                            }
+                            match value {
+                                Some(v) => {
+                                    contract_storage.insert(key, v);
+                                }
+                                None => {
+                                    contract_storage.remove(&key);
+                                }
+                            }
+                        }
+                        if t.amount > 0 {
+                            let contract_account = self
+                                .accounts
+                                .entry(contract_address.clone())
+                                .or_insert(Account::new(0));
+                            contract_account.balance =
+                                contract_account.balance.saturating_add(t.amount);
+                        }
+                        result.gas_used
+                    }
+                    Err(e) => {
+                        // A failed call changes nothing except charging the full gas limit;
+                        // the value sent with it goes back to the caller.
+                        info!(contract = %contract_address, error = %e, "contract call failed");
+                        let sender = self.accounts.get_mut(&t.sender).expect("Sender must exist");
+                        sender.balance = sender.balance.saturating_add(t.amount);
+                        *gas_limit
+                    }
+                };
 
-                let gas_used = *gas_limit / 2; // Simulate 50% gas usage for now
-
-                // Deduct gas cost
                 let sender = self.accounts.get_mut(&t.sender).expect("Sender must exist");
                 sender.balance = sender.balance.saturating_sub(gas_used);
-
-                // Transfer value to contract if non-zero
-                if t.amount > 0 {
-                    let contract_account = self
-                        .accounts
-                        .entry(contract_address.clone())
-                        .or_insert(Account::new(0));
-                    contract_account.balance += t.amount;
-                }
-
-                info!(
-                    caller = %t.sender,
-                    contract = %contract_address,
-                    function = %function,
-                    gas_used,
-                    "called contract"
-                );
 
                 Some(StateEvent::ContractCalled {
                     contract_address: contract_address.clone(),
@@ -1182,30 +1165,6 @@ impl State {
         Ok(event)
     }
 
-    /// Apply multiple transactions atomically (used for blocks)
-    pub fn apply_transactions(
-        &mut self,
-        txs: &[SignedTransaction],
-    ) -> Result<Vec<StateEvent>, StateError> {
-        let now = current_unix_timestamp();
-        self.apply_transactions_at(txs, now)
-    }
-
-    /// Apply multiple transactions atomically at a deterministic "chain time".
-    pub fn apply_transactions_at(
-        &mut self,
-        txs: &[SignedTransaction],
-        now: u64,
-    ) -> Result<Vec<StateEvent>, StateError> {
-        let mut events = Vec::new();
-        for tx in txs {
-            if let Some(event) = self.apply_transaction_at(tx, now)? {
-                events.push(event);
-            }
-        }
-        Ok(events)
-    }
-
     /// Distribute block rewards to the validator:
     /// - Sum of all transaction fees in the block
     /// - A fixed block reward (new token issuance / inflation)
@@ -1231,73 +1190,10 @@ impl State {
         }
     }
 
-    /// Slash a validator's stake for misbehaviour.
-    ///
-    /// The penalty is computed from the slashing config (basis points of the validator's stake).
-    /// The burned tokens are permanently destroyed (not redistributed).
-    /// Returns the amount actually burned, or 0 if the validator has no stake.
-    pub fn slash_stake(&mut self, validator_address: &str, reason: SlashReason, now: u64) -> u64 {
-        let staked = self.get_staked_balance(validator_address);
-        if staked == 0 {
-            return 0;
-        }
-
-        let penalty_bps = match &reason {
-            SlashReason::InvalidBlockProposal => self.slashing_config.invalid_block_penalty_bps,
-            SlashReason::MetricFraud => self.slashing_config.metric_fraud_penalty_bps,
-            SlashReason::MissedBlock => self.slashing_config.missed_block_penalty_bps,
-        };
-
-        let burn_amount = staked.saturating_mul(penalty_bps) / 10_000;
-        if burn_amount == 0 {
-            return 0;
-        }
-
-        // Reduce stake (tokens are burned, not returned to balance).
-        if let Some(stake) = self.stakes.get_mut(validator_address) {
-            stake.amount = stake.amount.saturating_sub(burn_amount);
-        }
-
-        // Record the slashing event.
-        self.slashing_records.push(SlashRecord {
-            validator: validator_address.to_string(),
-            reason,
-            amount_burned: burn_amount,
-            at_time: now,
-        });
-
-        burn_amount
-    }
-
-    /// Get the slashing history for a specific validator.
-    pub fn get_slash_records(&self, validator_address: &str) -> Vec<&SlashRecord> {
-        self.slashing_records
-            .iter()
-            .filter(|r| r.validator == validator_address)
-            .collect()
-    }
-
-    /// Compute a persistent slashing penalty factor for a validator.
-    ///
-    /// This is deterministic from state and therefore safe to use in validator selection.
-    pub fn slashing_penalty_for(&self, validator_address: &str) -> f64 {
-        self.slashing_records
-            .iter()
-            .filter(|record| record.validator == validator_address)
-            .fold(0.0f64, |acc, record| {
-                let base_penalty = match record.reason {
-                    SlashReason::InvalidBlockProposal => 0.35,
-                    SlashReason::MetricFraud => 0.25,
-                    SlashReason::MissedBlock => 0.10,
-                };
-                acc + base_penalty
-            })
-            .clamp(0.0, 1.0)
-    }
-
     /// Execute all passed proposals that have expired.
     /// Returns the list of executed proposal IDs for event broadcasting.
     /// This should be called periodically (e.g., after each block) to apply governance decisions.
+    #[cfg(test)]
     pub fn execute_passed_proposals(&mut self) -> Vec<ExecutedProposal> {
         let now = current_unix_timestamp();
         self.execute_passed_proposals_at(now)
@@ -1404,7 +1300,9 @@ impl State {
     }
 }
 
+#[cfg(test)]
 fn current_unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1417,6 +1315,101 @@ mod tests {
     use crate::transaction::{
         generate_ed25519_keypair, pubkey_to_address_hex, SignedTransaction, Transaction,
     };
+
+    const COUNTER_WAT: &str = r#"
+        (module
+          (import "env" "storage_write" (func $write (param i32 i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "count")
+          (data (i32.const 16) "\2a")
+          (data (i32.const 32) "__code")
+          (func (export "set") (result i64)
+            (call $write (i32.const 0) (i32.const 5) (i32.const 16) (i32.const 1))
+            (i64.const 7))
+          (func (export "overwrite_code")
+            (call $write (i32.const 32) (i32.const 6) (i32.const 16) (i32.const 1)))
+          (func (export "boom") unreachable))
+    "#;
+
+    #[test]
+    fn contracts_execute_for_real() {
+        let key = generate_ed25519_keypair();
+        let me = pubkey_to_address_hex(&key.verifying_key());
+        let mut state = State::with_genesis(vec![(me.clone(), 10_000_000)]);
+        let wasm = wat::parse_str(COUNTER_WAT).unwrap();
+
+        // Deploy.
+        let deploy = Transaction::deploy_contract(me.clone(), 1, 0, wasm.clone(), 1_000);
+        let deploy = SignedTransaction::sign_with_keypair(&deploy, &key);
+        state.apply_transaction_at(&deploy, 1).unwrap();
+        let contract = crate::contract::derive_contract_address(&me, 0);
+        assert!(state.contracts.contains_key(&contract));
+
+        // A successful call writes storage, transfers value and charges only gas used.
+        let before = state.get_balance(&me);
+        let call = Transaction::call_contract(
+            me.clone(),
+            contract.clone(),
+            "set".into(),
+            vec![],
+            100_000,
+            50,
+            1,
+            1,
+        );
+        let call = SignedTransaction::sign_with_keypair(&call, &key);
+        state.apply_transaction_at(&call, 2).unwrap();
+        let storage = &state.contract_storage[&contract];
+        assert_eq!(storage.get(b"count".as_slice()), Some(&vec![0x2a]));
+        assert_eq!(state.get_balance(&contract), 50);
+        let spent = before - state.get_balance(&me);
+        assert!(spent > 51 && spent < 51 + 100_000, "spent {spent}");
+
+        // Contracts cannot overwrite their own code.
+        let call = Transaction::call_contract(
+            me.clone(),
+            contract.clone(),
+            "overwrite_code".into(),
+            vec![],
+            100_000,
+            0,
+            1,
+            2,
+        );
+        let call = SignedTransaction::sign_with_keypair(&call, &key);
+        state.apply_transaction_at(&call, 3).unwrap();
+        assert_eq!(state.contract_storage[&contract][CONTRACT_CODE_KEY], wasm);
+
+        // A trapping call refunds the value and charges the full gas limit.
+        let before = state.get_balance(&me);
+        let call = Transaction::call_contract(
+            me.clone(),
+            contract.clone(),
+            "boom".into(),
+            vec![],
+            5_000,
+            99,
+            1,
+            3,
+        );
+        let call = SignedTransaction::sign_with_keypair(&call, &key);
+        state.apply_transaction_at(&call, 4).unwrap();
+        assert_eq!(before - state.get_balance(&me), 5_000 + 1);
+        assert_eq!(state.get_balance(&contract), 50);
+    }
+
+    #[test]
+    fn deploy_rejects_invalid_wasm() {
+        let key = generate_ed25519_keypair();
+        let me = pubkey_to_address_hex(&key.verifying_key());
+        let state = State::with_genesis(vec![(me.clone(), 10_000_000)]);
+        let deploy = Transaction::deploy_contract(me, 1, 0, vec![0, 1, 2, 3], 1_000);
+        let deploy = SignedTransaction::sign_with_keypair(&deploy, &key);
+        assert!(matches!(
+            state.validate_transaction_at(&deploy, 1),
+            Err(StateError::InvalidWasmModule)
+        ));
+    }
 
     #[test]
     fn test_basic_transfer() {
